@@ -33,14 +33,13 @@ CIVITAI_TOKEN = "3bf797ec7a0b65f197ca426ccb8cf193"
 # GLOBAL STATE
 # =============================================
 
-# Download queue
 download_queue = []
 queue_lock = threading.Lock()
 is_processing = False
 cancel_requested = False
 current_process = None
+current_item_id = None
 
-# Persistent logs
 persistent_logs = []
 MAX_LOGS = 200
 
@@ -106,8 +105,8 @@ def add_log(message, level="info"):
             persistent_logs = persistent_logs[-MAX_LOGS:]
     try:
         PromptServer.instance.send_sync("downloader.log", entry)
-    except Exception as e:
-        print(f"[Downloader] Log send error: {e}")
+    except:
+        pass
 
 def broadcast_state():
     """Send current state to frontend."""
@@ -119,8 +118,8 @@ def broadcast_state():
                 "logs": list(persistent_logs[-50:])
             }
         PromptServer.instance.send_sync("downloader.queue", state)
-    except Exception as e:
-        print(f"[Downloader] Broadcast error: {e}")
+    except:
+        pass
 
 def update_queue_item(item_id, **kwargs):
     """Update an item in the queue."""
@@ -147,6 +146,8 @@ def parse_hf_url(url):
 
 def download_huggingface(item_id, url, directory):
     """Download from HuggingFace."""
+    global cancel_requested
+    
     try:
         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
         from huggingface_hub import hf_hub_download, login
@@ -166,11 +167,21 @@ def download_huggingface(item_id, url, directory):
         
         start_time = time.time()
         
+        # Check cancel before download
+        if cancel_requested:
+            update_queue_item(item_id, status="cancelled", message="Cancelled")
+            return False
+        
         downloaded_path = hf_hub_download(
             repo_id=repo_id,
             filename=filename,
             token=HF_TOKEN
         )
+        
+        # Check cancel after download
+        if cancel_requested:
+            update_queue_item(item_id, status="cancelled", message="Cancelled")
+            return False
         
         final_path = os.path.join(directory, file_name)
         shutil.copy2(downloaded_path, final_path)
@@ -187,8 +198,9 @@ def download_huggingface(item_id, url, directory):
         return True
         
     except Exception as e:
-        update_queue_item(item_id, status="error", message=str(e))
-        add_log(f"❌ HF Error: {str(e)}", "error")
+        if not cancel_requested:
+            update_queue_item(item_id, status="error", message=str(e))
+            add_log(f"❌ HF Error: {str(e)}", "error")
         return False
 
 # =============================================
@@ -204,6 +216,7 @@ def prepare_civitai_url(url):
     return url
 
 def get_filename_from_url(url):
+    """Get filename from URL or headers."""
     try:
         import requests
         headers = {
@@ -240,10 +253,15 @@ def download_aria2(item_id, url, directory, custom_filename=None):
         add_log("❌ aria2c is required for CivitAI downloads", "error")
         return False
     
-    filename = custom_filename if custom_filename else get_filename_from_url(url)
+    # Get filename - auto-detect if not provided
+    if custom_filename:
+        filename = custom_filename
+    else:
+        add_log("🔍 Detecting filename...")
+        filename = get_filename_from_url(url)
     
     update_queue_item(item_id, detected_filename=filename, message=f"Downloading {filename}...")
-    add_log(f"Target: {directory}/{filename}")
+    add_log(f"📁 Target: {directory}/{filename}")
     
     os.makedirs(directory, exist_ok=True)
     
@@ -274,52 +292,69 @@ def download_aria2(item_id, url, directory, custom_filename=None):
     start_time = time.time()
     filepath = os.path.join(directory, filename)
     
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        bufsize=1
-    )
-    current_process = process
-    
-    for line in process.stdout:
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1
+        )
+        current_process = process
+        
+        for line in process.stdout:
+            # Check cancel flag
+            if cancel_requested:
+                process.terminate()
+                process.wait()
+                current_process = None
+                update_queue_item(item_id, status="cancelled", message="Cancelled by user")
+                return False
+            
+            line = line.strip()
+            if '[#' in line and 'DL:' in line:
+                try:
+                    pct_match = re.search(r'\((\d+)%\)', line)
+                    if pct_match:
+                        update_queue_item(item_id, progress=int(pct_match.group(1)))
+                    
+                    speed_match = re.search(r'DL:([^\s]+)', line)
+                    if speed_match:
+                        update_queue_item(item_id, speed=speed_match.group(1))
+                    
+                    eta_match = re.search(r'ETA:([^\]]+)', line)
+                    if eta_match:
+                        update_queue_item(item_id, eta=eta_match.group(1))
+                except:
+                    pass
+        
+        process.wait()
+        current_process = None
+        
         if cancel_requested:
-            process.terminate()
+            update_queue_item(item_id, status="cancelled", message="Cancelled")
             return False
         
-        line = line.strip()
-        if '[#' in line and 'DL:' in line:
-            try:
-                pct_match = re.search(r'\((\d+)%\)', line)
-                if pct_match:
-                    update_queue_item(item_id, progress=int(pct_match.group(1)))
-                
-                speed_match = re.search(r'DL:([^\s]+)', line)
-                if speed_match:
-                    update_queue_item(item_id, speed=speed_match.group(1))
-                
-                eta_match = re.search(r'ETA:([^\]]+)', line)
-                if eta_match:
-                    update_queue_item(item_id, eta=eta_match.group(1))
-            except:
-                pass
-    
-    process.wait()
-    current_process = None
-    
-    if process.returncode == 0 and os.path.exists(filepath):
-        duration = time.time() - start_time
-        file_size = os.path.getsize(filepath)
-        update_queue_item(item_id, 
-            status="completed",
-            progress=100,
-            message=f"Done! {format_bytes(file_size)} in {format_time(duration)}")
-        add_log(f"✅ Saved: {filepath}", "success")
-        return True
-    
-    update_queue_item(item_id, status="error", message="Download failed")
-    return False
+        if process.returncode == 0 and os.path.exists(filepath):
+            duration = time.time() - start_time
+            file_size = os.path.getsize(filepath)
+            update_queue_item(item_id, 
+                status="completed",
+                progress=100,
+                message=f"Done! {format_bytes(file_size)} in {format_time(duration)}")
+            add_log(f"✅ Saved: {filepath}", "success")
+            return True
+        
+        update_queue_item(item_id, status="error", message=f"Download failed (exit code: {process.returncode})")
+        add_log(f"❌ aria2c exit code: {process.returncode}", "error")
+        return False
+        
+    except Exception as e:
+        current_process = None
+        if not cancel_requested:
+            update_queue_item(item_id, status="error", message=str(e))
+            add_log(f"❌ Error: {str(e)}", "error")
+        return False
 
 # =============================================
 # Queue Processing
@@ -327,7 +362,7 @@ def download_aria2(item_id, url, directory, custom_filename=None):
 
 def process_queue():
     """Process all items in the queue."""
-    global is_processing, cancel_requested
+    global is_processing, cancel_requested, current_item_id
     
     is_processing = True
     cancel_requested = False
@@ -336,23 +371,31 @@ def process_queue():
     add_log("🚀 Queue processing started")
     
     while True:
+        # Check cancel before finding next item
+        if cancel_requested:
+            add_log("⏹ Queue stopped by user", "warning")
+            break
+        
         # Find next queued item
         next_item = None
         with queue_lock:
             for item in download_queue:
                 if item["status"] == "queued":
-                    next_item = item
+                    next_item = item.copy()  # Make a copy to avoid lock issues
                     break
         
-        if not next_item or cancel_requested:
+        if not next_item:
+            add_log("✅ All downloads completed")
             break
         
         item_id = next_item["id"]
+        current_item_id = item_id
+        
         update_queue_item(item_id, status="downloading", progress=0, message="Starting...")
         
         url = next_item["url"]
         directory = next_item["directory"]
-        filename = next_item.get("filename")
+        filename = next_item.get("filename")  # Can be None
         platform = next_item["platform"]
         
         add_log(f"📥 Downloading from {platform.upper()}...")
@@ -363,12 +406,18 @@ def process_queue():
             else:
                 download_aria2(item_id, url, directory, filename)
         except Exception as e:
-            update_queue_item(item_id, status="error", message=str(e))
-            add_log(f"❌ Error: {str(e)}", "error")
+            if not cancel_requested:
+                update_queue_item(item_id, status="error", message=str(e))
+                add_log(f"❌ Error: {str(e)}", "error")
+        
+        current_item_id = None
+        
+        # Small delay between downloads
+        time.sleep(0.5)
     
     is_processing = False
+    current_item_id = None
     broadcast_state()
-    add_log("✅ Queue processing completed")
 
 # =============================================
 # API ROUTES
@@ -390,8 +439,14 @@ async def add_to_queue(request):
     try:
         data = await request.json()
         url = data.get("url", "").strip()
-        directory = data.get("directory", "")
-        filename = data.get("filename", "").strip() or None
+        directory = data.get("directory", "").strip()
+        filename = data.get("filename")  # Can be None or empty string
+        
+        # Clean up filename - empty string becomes None
+        if filename is not None:
+            filename = filename.strip() if isinstance(filename, str) else None
+            if filename == "":
+                filename = None
         
         if not url:
             return web.json_response({"error": "URL is required"}, status=400)
@@ -402,7 +457,7 @@ async def add_to_queue(request):
             "id": f"{int(time.time() * 1000)}_{len(download_queue)}",
             "url": url,
             "directory": directory,
-            "filename": filename,
+            "filename": filename,  # None means auto-detect
             "platform": detect_platform(url),
             "status": "queued",
             "progress": 0,
@@ -436,18 +491,31 @@ async def start_queue(request):
 
 @PromptServer.instance.routes.post("/downloader/cancel")
 async def cancel_download(request):
-    """Cancel current download."""
-    global cancel_requested, current_process
+    """Cancel current download and stop queue."""
+    global cancel_requested, current_process, is_processing
     
     cancel_requested = True
+    
+    # Terminate current process if running
     if current_process:
         try:
             current_process.terminate()
         except:
             pass
     
+    # Mark current item as cancelled
+    if current_item_id:
+        update_queue_item(current_item_id, status="cancelled", message="Cancelled by user")
+    
     add_log("⏹ Download cancelled", "warning")
-    return web.json_response({"status": "cancelling"})
+    
+    # Wait a bit for the process to clean up
+    time.sleep(0.3)
+    
+    is_processing = False
+    broadcast_state()
+    
+    return web.json_response({"status": "cancelled"})
 
 @PromptServer.instance.routes.post("/downloader/remove")
 async def remove_item(request):
@@ -467,7 +535,7 @@ async def remove_item(request):
 
 @PromptServer.instance.routes.post("/downloader/clear")
 async def clear_completed(request):
-    """Clear completed items from queue."""
+    """Clear completed/error/cancelled items from queue."""
     global download_queue
     
     with queue_lock:
@@ -494,49 +562,5 @@ async def get_state(request):
             "logs": list(persistent_logs[-50:])
         }
     return web.json_response(state)
-
-# Also keep the old /downloader/start endpoint for backward compatibility with single downloads
-@PromptServer.instance.routes.post("/downloader/single")
-async def single_download(request):
-    """Single download (backward compatibility)."""
-    global download_queue, is_processing
-    try:
-        data = await request.json()
-        url = data.get("url", "").strip()
-        directory = data.get("directory", "")
-        filename = data.get("filename", "").strip() or None
-        
-        if not url:
-            return web.json_response({"error": "URL is required"}, status=400)
-        if not directory:
-            return web.json_response({"error": "Directory is required"}, status=400)
-        
-        if is_processing:
-            return web.json_response({"error": "Download already in progress"}, status=400)
-        
-        item = {
-            "id": f"{int(time.time() * 1000)}_single",
-            "url": url,
-            "directory": directory,
-            "filename": filename,
-            "platform": detect_platform(url),
-            "status": "queued",
-            "progress": 0,
-            "speed": "",
-            "eta": "",
-            "message": "Waiting...",
-            "detected_filename": ""
-        }
-        
-        with queue_lock:
-            download_queue.append(item)
-        
-        broadcast_state()
-        threading.Thread(target=process_queue, daemon=True).start()
-        
-        return web.json_response({"status": "started"})
-        
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
 
 print("[SidebarDownloader] Extension loaded with queue support")

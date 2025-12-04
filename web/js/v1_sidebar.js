@@ -117,12 +117,17 @@ function injectStyles() {
             padding: 10px 12px;
             border: 1px solid rgba(255,255,255,0.1);
             border-radius: 8px;
-            background: rgba(255,255,255,0.05);
+            background: #1a1a1f;
             color: #e0e0e0;
             font-size: 13px;
             cursor: pointer;
             outline: none;
             box-sizing: border-box;
+        }
+        .dl-select option {
+            background: #1a1a1f;
+            color: #e0e0e0;
+            padding: 8px;
         }
         .dl-btn {
             padding: 10px 16px;
