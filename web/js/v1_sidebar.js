@@ -1,16 +1,33 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+// Global state - persists across tab open/close
+let globalState = {
+    queue: [],
+    logs: [],
+    is_processing: false
+};
+let elements = {};
+
 app.registerExtension({
     name: "My.DownloaderSidebar",
     async setup() {
         // Listen for queue updates
         api.addEventListener("downloader.queue", (event) => {
-            updateQueueUI(event.detail);
+            globalState = event.detail;
+            if (elements.queueList) {
+                renderQueue();
+            }
         });
 
         api.addEventListener("downloader.log", (event) => {
-            addLogEntry(event.detail);
+            globalState.logs.push(event.detail);
+            if (globalState.logs.length > 100) {
+                globalState.logs = globalState.logs.slice(-100);
+            }
+            if (elements.logContainer) {
+                addLogEntry(event.detail);
+            }
         });
 
         if (app.extensionManager && app.extensionManager.registerSidebarTab) {
@@ -24,487 +41,352 @@ app.registerExtension({
 
                 render: (el) => {
                     el.innerHTML = "";
+                    elements = {}; // Reset element references
 
-                    // Main container with modern styling
+                    // Container styles
                     Object.assign(el.style, {
                         display: "flex",
                         flexDirection: "column",
                         padding: "0",
                         height: "100%",
                         boxSizing: "border-box",
-                        background: "linear-gradient(180deg, rgba(15,15,20,0.95) 0%, rgba(10,10,15,0.98) 100%)",
+                        background: "#0d0d12",
                         color: "#e0e0e0",
-                        fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+                        fontFamily: "system-ui, -apple-system, sans-serif",
                         overflow: "hidden"
                     });
 
-                    // Add CSS styles
+                    // Inject styles
                     injectStyles();
 
-                    // Header
+                    // Build UI
                     el.appendChild(createHeader());
-
-                    // Add form section
                     el.appendChild(createAddForm());
-
-                    // Queue section
                     el.appendChild(createQueueSection());
-
-                    // Log section
                     el.appendChild(createLogSection());
 
-                    // Load initial state
-                    loadInitialState();
+                    // Load state from server
+                    loadState();
                 }
             });
 
         } else {
-            console.warn("ComfyUI version doesn't support Sidebar API V1.");
+            console.warn("ComfyUI doesn't support Sidebar API V1");
         }
     }
 });
 
-// Store references
-let elements = {};
-let state = { queue: [], logs: [], is_processing: false };
-
 function injectStyles() {
-    if (document.getElementById('downloader-styles')) return;
+    if (document.getElementById('dl-styles')) return;
 
     const style = document.createElement('style');
-    style.id = 'downloader-styles';
+    style.id = 'dl-styles';
     style.textContent = `
-        .dl-container * {
-            box-sizing: border-box;
+        .dl-section {
+            padding: 14px 16px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
         }
-        
+        .dl-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: rgba(255,255,255,0.5);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
         .dl-input {
             width: 100%;
-            padding: 12px 14px;
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 10px;
-            background: rgba(255,255,255,0.04);
+            padding: 10px 12px;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.05);
             color: #e0e0e0;
             font-size: 13px;
-            transition: all 0.2s ease;
             outline: none;
+            box-sizing: border-box;
+            transition: border-color 0.2s;
         }
-        
         .dl-input:focus {
-            border-color: rgba(99, 102, 241, 0.6);
-            background: rgba(255,255,255,0.06);
-            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+            border-color: #6366f1;
         }
-        
         .dl-input::placeholder {
             color: rgba(255,255,255,0.3);
         }
-        
         .dl-select {
             width: 100%;
-            padding: 12px 14px;
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 10px;
-            background: rgba(255,255,255,0.04);
+            padding: 10px 12px;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.05);
             color: #e0e0e0;
             font-size: 13px;
             cursor: pointer;
-            transition: all 0.2s ease;
             outline: none;
-            appearance: none;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23888' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");
-            background-repeat: no-repeat;
-            background-position: right 12px center;
+            box-sizing: border-box;
         }
-        
-        .dl-select:focus {
-            border-color: rgba(99, 102, 241, 0.6);
-        }
-        
         .dl-btn {
-            padding: 12px 20px;
+            padding: 10px 16px;
             border: none;
-            border-radius: 10px;
-            font-size: 13px;
+            border-radius: 8px;
+            font-size: 12px;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.2s ease;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-        }
-        
-        .dl-btn-primary {
-            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-            color: white;
-            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
-        }
-        
-        .dl-btn-primary:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
-        }
-        
-        .dl-btn-secondary {
-            background: rgba(255,255,255,0.06);
-            color: #a0a0a0;
-            border: 1px solid rgba(255,255,255,0.1);
-        }
-        
-        .dl-btn-secondary:hover {
-            background: rgba(255,255,255,0.1);
-            color: #e0e0e0;
-        }
-        
-        .dl-btn-danger {
-            background: rgba(239, 68, 68, 0.15);
-            color: #f87171;
-            border: 1px solid rgba(239, 68, 68, 0.2);
-        }
-        
-        .dl-btn-danger:hover {
-            background: rgba(239, 68, 68, 0.25);
-        }
-        
-        .dl-btn-success {
-            background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
-            color: white;
-            box-shadow: 0 4px 15px rgba(34, 197, 94, 0.3);
-        }
-        
-        .dl-queue-item {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 12px;
-            padding: 14px;
-            margin-bottom: 10px;
-            transition: all 0.2s ease;
-        }
-        
-        .dl-queue-item:hover {
-            background: rgba(255,255,255,0.05);
-            border-color: rgba(255,255,255,0.1);
-        }
-        
-        .dl-queue-item.downloading {
-            border-color: rgba(99, 102, 241, 0.4);
-            box-shadow: 0 0 20px rgba(99, 102, 241, 0.1);
-        }
-        
-        .dl-queue-item.completed {
-            border-color: rgba(34, 197, 94, 0.4);
-        }
-        
-        .dl-queue-item.error {
-            border-color: rgba(239, 68, 68, 0.4);
-        }
-        
-        .dl-progress-bar {
-            width: 100%;
-            height: 6px;
-            background: rgba(255,255,255,0.1);
-            border-radius: 3px;
-            overflow: hidden;
-            margin: 10px 0;
-        }
-        
-        .dl-progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #6366f1, #8b5cf6, #a855f7);
-            border-radius: 3px;
-            transition: width 0.3s ease;
-            background-size: 200% 100%;
-            animation: shimmer 2s linear infinite;
-        }
-        
-        @keyframes shimmer {
-            0% { background-position: 200% 0; }
-            100% { background-position: -200% 0; }
-        }
-        
-        .dl-badge {
+            transition: all 0.2s;
             display: inline-flex;
             align-items: center;
-            padding: 4px 10px;
-            border-radius: 20px;
-            font-size: 11px;
+            gap: 6px;
+        }
+        .dl-btn-primary {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            color: white;
+        }
+        .dl-btn-primary:hover {
+            opacity: 0.9;
+        }
+        .dl-btn-secondary {
+            background: rgba(255,255,255,0.08);
+            color: #ccc;
+        }
+        .dl-btn-secondary:hover {
+            background: rgba(255,255,255,0.12);
+        }
+        .dl-btn-danger {
+            background: rgba(239,68,68,0.2);
+            color: #f87171;
+        }
+        .dl-btn-success {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+            color: white;
+        }
+        .dl-queue-item {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 8px;
+        }
+        .dl-queue-item.downloading {
+            border-color: rgba(99,102,241,0.5);
+        }
+        .dl-queue-item.completed {
+            border-color: rgba(34,197,94,0.5);
+        }
+        .dl-queue-item.error {
+            border-color: rgba(239,68,68,0.5);
+        }
+        .dl-progress {
+            width: 100%;
+            height: 4px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 2px;
+            overflow: hidden;
+            margin: 8px 0;
+        }
+        .dl-progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #6366f1, #a855f7);
+            border-radius: 2px;
+            transition: width 0.3s;
+        }
+        .dl-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 10px;
             font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
         }
-        
-        .dl-badge-hf {
-            background: rgba(255, 204, 0, 0.15);
-            color: #fcd34d;
-        }
-        
-        .dl-badge-civitai {
-            background: rgba(76, 201, 240, 0.15);
-            color: #67e8f9;
-        }
-        
-        .dl-badge-other {
-            background: rgba(156, 163, 175, 0.15);
-            color: #9ca3af;
-        }
-        
-        .dl-badge-queued {
-            background: rgba(156, 163, 175, 0.15);
-            color: #9ca3af;
-        }
-        
-        .dl-badge-downloading {
-            background: rgba(99, 102, 241, 0.2);
-            color: #a5b4fc;
-        }
-        
-        .dl-badge-completed {
-            background: rgba(34, 197, 94, 0.15);
-            color: #86efac;
-        }
-        
-        .dl-badge-error {
-            background: rgba(239, 68, 68, 0.15);
-            color: #fca5a5;
-        }
-        
-        .dl-log-entry {
-            padding: 6px 0;
-            font-size: 11px;
-            font-family: 'JetBrains Mono', 'Fira Code', monospace;
-            border-bottom: 1px solid rgba(255,255,255,0.03);
-            word-break: break-word;
-        }
-        
-        .dl-log-time {
-            opacity: 0.4;
-            margin-right: 8px;
-        }
-        
-        .dl-section {
-            padding: 16px;
-            border-bottom: 1px solid rgba(255,255,255,0.05);
-        }
-        
-        .dl-section-title {
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            color: rgba(255,255,255,0.4);
-            margin-bottom: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        
+        .dl-badge-hf { background: rgba(255,204,0,0.15); color: #fcd34d; }
+        .dl-badge-civitai { background: rgba(76,201,240,0.15); color: #67e8f9; }
+        .dl-badge-other { background: rgba(156,163,175,0.15); color: #9ca3af; }
+        .dl-badge-queued { background: rgba(156,163,175,0.15); color: #9ca3af; }
+        .dl-badge-downloading { background: rgba(99,102,241,0.2); color: #a5b4fc; }
+        .dl-badge-completed { background: rgba(34,197,94,0.15); color: #86efac; }
+        .dl-badge-error { background: rgba(239,68,68,0.15); color: #fca5a5; }
+        .dl-badge-cancelled { background: rgba(156,163,175,0.15); color: #9ca3af; }
         .dl-scrollable {
             overflow-y: auto;
             scrollbar-width: thin;
-            scrollbar-color: rgba(255,255,255,0.1) transparent;
+            scrollbar-color: rgba(255,255,255,0.15) transparent;
         }
-        
-        .dl-scrollable::-webkit-scrollbar {
-            width: 6px;
-        }
-        
-        .dl-scrollable::-webkit-scrollbar-track {
-            background: transparent;
-        }
-        
-        .dl-scrollable::-webkit-scrollbar-thumb {
-            background: rgba(255,255,255,0.1);
-            border-radius: 3px;
-        }
-        
-        .dl-empty-state {
-            text-align: center;
-            padding: 30px 20px;
-            color: rgba(255,255,255,0.3);
-            font-size: 13px;
-        }
-        
-        .dl-platform-indicator {
+        .dl-scrollable::-webkit-scrollbar { width: 5px; }
+        .dl-scrollable::-webkit-scrollbar-track { background: transparent; }
+        .dl-scrollable::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+        .dl-log-entry {
             font-size: 11px;
-            margin-top: 6px;
-            min-height: 18px;
+            font-family: monospace;
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+            word-break: break-all;
         }
     `;
     document.head.appendChild(style);
 }
 
 function createHeader() {
-    const header = document.createElement('div');
-    header.className = 'dl-section';
-    header.style.cssText = 'background: linear-gradient(135deg, rgba(99,102,241,0.1) 0%, rgba(139,92,246,0.05) 100%); border-bottom: 1px solid rgba(99,102,241,0.2);';
-    header.innerHTML = `
-        <div style="display: flex; align-items: center; gap: 12px;">
-            <div style="width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, #6366f1, #8b5cf6); display: flex; align-items: center; justify-content: center; font-size: 18px;">
-                ⬇️
-            </div>
+    const div = document.createElement('div');
+    div.className = 'dl-section';
+    div.style.background = 'linear-gradient(135deg, rgba(99,102,241,0.1), rgba(139,92,246,0.05))';
+    div.innerHTML = `
+        <div style="display:flex; align-items:center; gap:12px;">
+            <div style="width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,#6366f1,#8b5cf6); display:flex; align-items:center; justify-content:center; font-size:16px;">⬇️</div>
             <div>
-                <div style="font-size: 16px; font-weight: 700; letter-spacing: -0.3px;">Model Downloader</div>
-                <div style="font-size: 11px; opacity: 0.5; margin-top: 2px;">HuggingFace • CivitAI • Direct URLs</div>
+                <div style="font-size:15px; font-weight:700;">Model Downloader</div>
+                <div style="font-size:10px; opacity:0.5;">HuggingFace • CivitAI • URLs</div>
             </div>
         </div>
     `;
-    return header;
+    return div;
 }
 
 function createAddForm() {
-    const section = document.createElement('div');
-    section.className = 'dl-section';
-    section.innerHTML = `
-        <div class="dl-section-title">Add Download</div>
-        <div style="display: flex; flex-direction: column; gap: 12px;">
-            <div>
-                <input type="text" id="dl-url" class="dl-input" placeholder="Paste model URL here...">
-                <div id="dl-platform-indicator" class="dl-platform-indicator"></div>
-            </div>
-            <div style="display: flex; gap: 8px;">
-                <select id="dl-directory" class="dl-select" style="flex: 1;"></select>
-            </div>
-            <input type="text" id="dl-custom-dir" class="dl-input" placeholder="Custom directory path..." style="display: none;">
+    const div = document.createElement('div');
+    div.className = 'dl-section';
+
+    div.innerHTML = `
+        <div class="dl-label">Add Download</div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            <input type="text" id="dl-url" class="dl-input" placeholder="Paste model URL here...">
+            <div id="dl-platform" style="font-size:11px; min-height:16px;"></div>
+            <select id="dl-dir" class="dl-select"></select>
+            <input type="text" id="dl-custom-dir" class="dl-input" placeholder="Custom directory path..." style="display:none;">
             <input type="text" id="dl-filename" class="dl-input" placeholder="Custom filename (optional)">
-            <div style="display: flex; gap: 8px;">
-                <button id="dl-add-btn" class="dl-btn dl-btn-secondary" style="flex: 1;">
-                    <span>➕</span> Add to Queue
-                </button>
-                <button id="dl-add-start-btn" class="dl-btn dl-btn-primary" style="flex: 1;">
-                    <span>⚡</span> Add & Start
-                </button>
+            <div style="display:flex; gap:8px;">
+                <button id="dl-add-btn" class="dl-btn dl-btn-secondary" style="flex:1;">➕ Add to Queue</button>
+                <button id="dl-add-start-btn" class="dl-btn dl-btn-primary" style="flex:1;">⚡ Add & Start</button>
             </div>
         </div>
     `;
 
-    // Store references
-    elements.urlInput = section.querySelector('#dl-url');
-    elements.platformIndicator = section.querySelector('#dl-platform-indicator');
-    elements.dirSelect = section.querySelector('#dl-directory');
-    elements.customDirInput = section.querySelector('#dl-custom-dir');
-    elements.filenameInput = section.querySelector('#dl-filename');
+    elements.urlInput = div.querySelector('#dl-url');
+    elements.platformDiv = div.querySelector('#dl-platform');
+    elements.dirSelect = div.querySelector('#dl-dir');
+    elements.customDirInput = div.querySelector('#dl-custom-dir');
+    elements.filenameInput = div.querySelector('#dl-filename');
 
-    // Event listeners
-    elements.urlInput.addEventListener('input', updatePlatformIndicator);
+    // URL change handler
+    elements.urlInput.addEventListener('input', () => {
+        const url = elements.urlInput.value.toLowerCase();
+        if (url.includes('huggingface.co') || url.includes('hf.co')) {
+            elements.platformDiv.innerHTML = '<span class="dl-badge dl-badge-hf">🤗 HuggingFace</span>';
+        } else if (url.includes('civitai.com')) {
+            elements.platformDiv.innerHTML = '<span class="dl-badge dl-badge-civitai">🎨 CivitAI</span>';
+        } else if (url.length > 10) {
+            elements.platformDiv.innerHTML = '<span class="dl-badge dl-badge-other">🌐 Direct URL</span>';
+        } else {
+            elements.platformDiv.innerHTML = '';
+        }
+    });
+
+    // Directory change handler
     elements.dirSelect.addEventListener('change', () => {
         elements.customDirInput.style.display = elements.dirSelect.value === 'custom' ? 'block' : 'none';
     });
 
-    section.querySelector('#dl-add-btn').onclick = () => addToQueue(false);
-    section.querySelector('#dl-add-start-btn').onclick = () => addToQueue(true);
+    // Button handlers
+    div.querySelector('#dl-add-btn').onclick = () => addDownload(false);
+    div.querySelector('#dl-add-start-btn').onclick = () => addDownload(true);
 
     // Load directories
     loadDirectories();
 
-    return section;
+    return div;
 }
 
 function createQueueSection() {
-    const section = document.createElement('div');
-    section.className = 'dl-section';
-    section.style.cssText = 'flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden;';
-    section.innerHTML = `
-        <div class="dl-section-title">
-            <span>Download Queue <span id="dl-queue-count" style="opacity: 0.5;">(0)</span></span>
-            <div style="display: flex; gap: 6px;">
-                <button id="dl-start-btn" class="dl-btn dl-btn-success" style="padding: 6px 12px; font-size: 11px;">▶ Start</button>
-                <button id="dl-clear-btn" class="dl-btn dl-btn-secondary" style="padding: 6px 12px; font-size: 11px;">Clear Done</button>
+    const div = document.createElement('div');
+    div.className = 'dl-section';
+    div.style.cssText = 'flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden;';
+
+    div.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <div class="dl-label" style="margin:0;">Queue <span id="dl-count">(0)</span></div>
+            <div style="display:flex; gap:6px;">
+                <button id="dl-start-btn" class="dl-btn dl-btn-success" style="padding:6px 12px; font-size:11px;">▶ Start</button>
+                <button id="dl-clear-btn" class="dl-btn dl-btn-secondary" style="padding:6px 12px; font-size:11px;">Clear</button>
             </div>
         </div>
-        <div id="dl-queue-list" class="dl-scrollable" style="flex: 1; min-height: 0;"></div>
+        <div id="dl-queue" class="dl-scrollable" style="flex:1; min-height:0;"></div>
     `;
 
-    elements.queueCount = section.querySelector('#dl-queue-count');
-    elements.queueList = section.querySelector('#dl-queue-list');
-    elements.startBtn = section.querySelector('#dl-start-btn');
-    elements.clearBtn = section.querySelector('#dl-clear-btn');
+    elements.queueCount = div.querySelector('#dl-count');
+    elements.queueList = div.querySelector('#dl-queue');
+    elements.startBtn = div.querySelector('#dl-start-btn');
+    elements.clearBtn = div.querySelector('#dl-clear-btn');
 
     elements.startBtn.onclick = startQueue;
     elements.clearBtn.onclick = clearCompleted;
 
-    return section;
+    return div;
 }
 
 function createLogSection() {
-    const section = document.createElement('div');
-    section.style.cssText = 'height: 150px; display: flex; flex-direction: column; border-top: 1px solid rgba(255,255,255,0.05);';
-    section.innerHTML = `
-        <div class="dl-section-title" style="padding: 12px 16px 8px;">
-            <span>Activity Log</span>
-            <button id="dl-clear-log-btn" style="background: transparent; border: none; color: rgba(255,255,255,0.4); font-size: 10px; cursor: pointer;">Clear</button>
+    const div = document.createElement('div');
+    div.style.cssText = 'height:130px; display:flex; flex-direction:column; border-top:1px solid rgba(255,255,255,0.06);';
+
+    div.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 16px 6px;">
+            <div class="dl-label" style="margin:0;">Log</div>
+            <button id="dl-clear-log" style="background:none; border:none; color:rgba(255,255,255,0.4); font-size:10px; cursor:pointer;">Clear</button>
         </div>
-        <div id="dl-log-container" class="dl-scrollable" style="flex: 1; padding: 0 16px 12px; min-height: 0;"></div>
+        <div id="dl-logs" class="dl-scrollable" style="flex:1; padding:0 16px 10px; min-height:0;"></div>
     `;
 
-    elements.logContainer = section.querySelector('#dl-log-container');
-    section.querySelector('#dl-clear-log-btn').onclick = clearLogs;
+    elements.logContainer = div.querySelector('#dl-logs');
+    div.querySelector('#dl-clear-log').onclick = clearLogs;
 
-    return section;
-}
-
-function updatePlatformIndicator() {
-    const url = elements.urlInput.value.toLowerCase();
-    const indicator = elements.platformIndicator;
-
-    if (url.includes('huggingface.co') || url.includes('hf.co')) {
-        indicator.innerHTML = `<span class="dl-badge dl-badge-hf">🤗 HuggingFace</span>`;
-    } else if (url.includes('civitai.com')) {
-        indicator.innerHTML = `<span class="dl-badge dl-badge-civitai">🎨 CivitAI</span>`;
-    } else if (url.length > 15) {
-        indicator.innerHTML = `<span class="dl-badge dl-badge-other">🌐 Direct URL</span>`;
-    } else {
-        indicator.innerHTML = '';
-    }
+    return div;
 }
 
 async function loadDirectories() {
     try {
-        const response = await api.fetchApi('/downloader/directories');
-        const data = await response.json();
+        const res = await api.fetchApi('/downloader/directories');
+        const data = await res.json();
 
-        const select = elements.dirSelect;
-        select.innerHTML = '<option value="">Select directory...</option>';
+        elements.dirSelect.innerHTML = '<option value="">Select directory...</option>';
 
         for (const [name, path] of Object.entries(data.directories)) {
-            const option = document.createElement('option');
-            option.value = path;
-            option.textContent = name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-            select.appendChild(option);
+            const opt = document.createElement('option');
+            opt.value = path;
+            opt.textContent = name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+            elements.dirSelect.appendChild(opt);
         }
 
-        const customOption = document.createElement('option');
-        customOption.value = 'custom';
-        customOption.textContent = '📁 Custom Path...';
-        select.appendChild(customOption);
+        const custom = document.createElement('option');
+        custom.value = 'custom';
+        custom.textContent = '📁 Custom Path...';
+        elements.dirSelect.appendChild(custom);
 
     } catch (e) {
-        console.error('Failed to load directories:', e);
+        console.error('Load directories failed:', e);
     }
 }
 
-async function loadInitialState() {
+async function loadState() {
     try {
-        const response = await api.fetchApi('/downloader/state');
-        const data = await response.json();
-        updateQueueUI(data);
+        const res = await api.fetchApi('/downloader/state');
+        const data = await res.json();
+        globalState = data;
+
+        renderQueue();
 
         // Restore logs
-        if (data.logs) {
-            data.logs.forEach(log => addLogEntry(log, false));
+        if (elements.logContainer && data.logs) {
+            elements.logContainer.innerHTML = '';
+            data.logs.forEach(log => addLogEntry(log));
         }
     } catch (e) {
-        console.error('Failed to load state:', e);
+        console.error('Load state failed:', e);
     }
 }
 
-async function addToQueue(autoStart) {
+async function addDownload(autoStart) {
     const url = elements.urlInput.value.trim();
     let directory = elements.dirSelect.value;
     const filename = elements.filenameInput.value.trim();
 
     if (!url) {
-        addLogEntry({ message: 'Please enter a URL', level: 'error' });
+        alert('Please enter a URL');
         return;
     }
 
@@ -513,7 +395,7 @@ async function addToQueue(autoStart) {
     }
 
     if (!directory) {
-        addLogEntry({ message: 'Please select a directory', level: 'error' });
+        alert('Please select a directory');
         return;
     }
 
@@ -527,14 +409,14 @@ async function addToQueue(autoStart) {
         // Clear inputs
         elements.urlInput.value = '';
         elements.filenameInput.value = '';
-        elements.platformIndicator.innerHTML = '';
+        elements.platformDiv.innerHTML = '';
 
         if (autoStart) {
             startQueue();
         }
-
     } catch (e) {
-        addLogEntry({ message: `Failed to add: ${e.message}`, level: 'error' });
+        console.error('Add failed:', e);
+        alert('Failed to add download: ' + e.message);
     }
 }
 
@@ -542,7 +424,7 @@ async function startQueue() {
     try {
         await api.fetchApi('/downloader/start', { method: 'POST' });
     } catch (e) {
-        console.error('Failed to start:', e);
+        console.error('Start failed:', e);
     }
 }
 
@@ -550,7 +432,7 @@ async function cancelDownload() {
     try {
         await api.fetchApi('/downloader/cancel', { method: 'POST' });
     } catch (e) {
-        console.error('Failed to cancel:', e);
+        console.error('Cancel failed:', e);
     }
 }
 
@@ -562,7 +444,7 @@ async function removeItem(id) {
             body: JSON.stringify({ id })
         });
     } catch (e) {
-        console.error('Failed to remove:', e);
+        console.error('Remove failed:', e);
     }
 }
 
@@ -570,81 +452,86 @@ async function clearCompleted() {
     try {
         await api.fetchApi('/downloader/clear', { method: 'POST' });
     } catch (e) {
-        console.error('Failed to clear:', e);
+        console.error('Clear failed:', e);
     }
 }
 
 async function clearLogs() {
     try {
         await api.fetchApi('/downloader/clear-logs', { method: 'POST' });
-        elements.logContainer.innerHTML = '';
+        if (elements.logContainer) {
+            elements.logContainer.innerHTML = '';
+        }
+        globalState.logs = [];
     } catch (e) {
-        console.error('Failed to clear logs:', e);
+        console.error('Clear logs failed:', e);
     }
 }
 
-function updateQueueUI(data) {
-    state = data;
+function renderQueue() {
+    if (!elements.queueList) return;
 
-    // Update button states
-    if (data.is_processing) {
-        elements.startBtn.innerHTML = '⏹ Stop';
-        elements.startBtn.className = 'dl-btn dl-btn-danger';
-        elements.startBtn.onclick = cancelDownload;
-    } else {
-        elements.startBtn.innerHTML = '▶ Start';
-        elements.startBtn.className = 'dl-btn dl-btn-success';
-        elements.startBtn.onclick = startQueue;
+    const queue = globalState.queue || [];
+    const isProcessing = globalState.is_processing;
+
+    // Update count
+    if (elements.queueCount) {
+        elements.queueCount.textContent = `(${queue.length})`;
     }
 
-    // Update queue count
-    elements.queueCount.textContent = `(${data.queue.length})`;
+    // Update start/stop button
+    if (elements.startBtn) {
+        if (isProcessing) {
+            elements.startBtn.innerHTML = '⏹ Stop';
+            elements.startBtn.className = 'dl-btn dl-btn-danger';
+            elements.startBtn.onclick = cancelDownload;
+        } else {
+            elements.startBtn.innerHTML = '▶ Start';
+            elements.startBtn.className = 'dl-btn dl-btn-success';
+            elements.startBtn.onclick = startQueue;
+        }
+    }
 
     // Render queue items
-    if (data.queue.length === 0) {
+    if (queue.length === 0) {
         elements.queueList.innerHTML = `
-            <div class="dl-empty-state">
-                <div style="font-size: 32px; margin-bottom: 10px; opacity: 0.3;">📭</div>
-                <div>Queue is empty</div>
-                <div style="font-size: 11px; margin-top: 4px; opacity: 0.5;">Add URLs above to start downloading</div>
+            <div style="text-align:center; padding:30px; color:rgba(255,255,255,0.3);">
+                <div style="font-size:28px; margin-bottom:8px;">📭</div>
+                <div style="font-size:12px;">Queue is empty</div>
             </div>
         `;
         return;
     }
 
-    elements.queueList.innerHTML = data.queue.map(item => {
-        const platformClass = item.platform === 'huggingface' ? 'dl-badge-hf' :
-            item.platform === 'civitai' ? 'dl-badge-civitai' : 'dl-badge-other';
-        const statusClass = `dl-badge-${item.status}`;
-        const itemClass = item.status;
-
+    elements.queueList.innerHTML = queue.map(item => {
+        const platformClass = item.platform === 'huggingface' ? 'hf' : item.platform === 'civitai' ? 'civitai' : 'other';
         const filename = item.detected_filename || item.filename || 'Detecting...';
-        const displayUrl = item.url.length > 50 ? item.url.substring(0, 50) + '...' : item.url;
+        const shortUrl = item.url.length > 45 ? item.url.substring(0, 45) + '...' : item.url;
 
         return `
-            <div class="dl-queue-item ${itemClass}" data-id="${item.id}">
-                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
-                    <div style="flex: 1; min-width: 0;">
-                        <div style="font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${filename}</div>
-                        <div style="font-size: 10px; opacity: 0.4; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${displayUrl}</div>
+            <div class="dl-queue-item ${item.status}" data-id="${item.id}">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-weight:600; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${filename}</div>
+                        <div style="font-size:10px; opacity:0.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${shortUrl}</div>
                     </div>
-                    <button class="dl-remove-btn" style="background: transparent; border: none; color: rgba(255,255,255,0.3); cursor: pointer; padding: 4px; font-size: 14px;">&times;</button>
+                    <button class="dl-remove-btn" style="background:none; border:none; color:rgba(255,255,255,0.3); cursor:pointer; padding:0; font-size:16px; line-height:1;">×</button>
                 </div>
-                <div style="display: flex; gap: 6px; margin-bottom: 8px;">
-                    <span class="dl-badge ${platformClass}">${item.platform}</span>
-                    <span class="dl-badge ${statusClass}">${item.status}</span>
+                <div style="display:flex; gap:6px; margin-top:6px;">
+                    <span class="dl-badge dl-badge-${platformClass}">${item.platform}</span>
+                    <span class="dl-badge dl-badge-${item.status}">${item.status}</span>
                 </div>
                 ${item.status === 'downloading' ? `
-                    <div class="dl-progress-bar">
-                        <div class="dl-progress-fill" style="width: ${item.progress}%;"></div>
+                    <div class="dl-progress">
+                        <div class="dl-progress-bar" style="width:${item.progress}%;"></div>
                     </div>
-                    <div style="display: flex; justify-content: space-between; font-size: 10px; opacity: 0.6;">
+                    <div style="display:flex; justify-content:space-between; font-size:10px; opacity:0.6;">
                         <span>${item.progress}%</span>
                         <span>${item.speed || ''}</span>
                         <span>${item.eta ? 'ETA: ' + item.eta : ''}</span>
                     </div>
                 ` : ''}
-                <div style="font-size: 11px; opacity: 0.6; margin-top: 6px;">${item.message || ''}</div>
+                <div style="font-size:10px; opacity:0.5; margin-top:4px;">${item.message || ''}</div>
             </div>
         `;
     }).join('');
@@ -658,7 +545,7 @@ function updateQueueUI(data) {
     });
 }
 
-function addLogEntry(data, scroll = true) {
+function addLogEntry(log) {
     if (!elements.logContainer) return;
 
     const colors = {
@@ -671,13 +558,10 @@ function addLogEntry(data, scroll = true) {
     const entry = document.createElement('div');
     entry.className = 'dl-log-entry';
     entry.innerHTML = `
-        <span class="dl-log-time">[${data.timestamp || new Date().toLocaleTimeString().slice(0, 5)}]</span>
-        <span style="color: ${colors[data.level] || colors.info}">${data.message}</span>
+        <span style="opacity:0.4;">[${log.timestamp || '--:--'}]</span>
+        <span style="color:${colors[log.level] || colors.info}">${log.message}</span>
     `;
 
     elements.logContainer.appendChild(entry);
-
-    if (scroll) {
-        elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
-    }
+    elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
 }
