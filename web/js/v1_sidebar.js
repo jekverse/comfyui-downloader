@@ -4,13 +4,13 @@ import { api } from "../../scripts/api.js";
 app.registerExtension({
     name: "My.DownloaderSidebar",
     async setup() {
-        // Listen for download status updates
-        api.addEventListener("downloader.status", (event) => {
-            updateUI(event.detail);
+        // Listen for queue updates
+        api.addEventListener("downloader.queue", (event) => {
+            updateQueueUI(event.detail);
         });
 
         api.addEventListener("downloader.log", (event) => {
-            addLog(event.detail);
+            addLogEntry(event.detail);
         });
 
         if (app.extensionManager && app.extensionManager.registerSidebarTab) {
@@ -25,40 +25,36 @@ app.registerExtension({
                 render: (el) => {
                     el.innerHTML = "";
 
-                    // Container styles
+                    // Main container with modern styling
                     Object.assign(el.style, {
                         display: "flex",
                         flexDirection: "column",
-                        padding: "16px",
-                        gap: "12px",
-                        color: "var(--fg-color)",
+                        padding: "0",
                         height: "100%",
                         boxSizing: "border-box",
-                        overflow: "auto"
+                        background: "linear-gradient(180deg, rgba(15,15,20,0.95) 0%, rgba(10,10,15,0.98) 100%)",
+                        color: "#e0e0e0",
+                        fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+                        overflow: "hidden"
                     });
 
+                    // Add CSS styles
+                    injectStyles();
+
                     // Header
-                    const header = document.createElement("div");
-                    header.innerHTML = `
-                        <h3 style="margin: 0 0 4px 0; font-size: 16px;">🚀 Model Downloader</h3>
-                        <p style="margin: 0; font-size: 11px; opacity: 0.7;">HuggingFace • CivitAI • Direct URLs</p>
-                    `;
-                    el.appendChild(header);
+                    el.appendChild(createHeader());
 
-                    // Create main form section
-                    const formSection = createFormSection();
-                    el.appendChild(formSection);
+                    // Add form section
+                    el.appendChild(createAddForm());
 
-                    // Progress section
-                    const progressSection = createProgressSection();
-                    el.appendChild(progressSection);
+                    // Queue section
+                    el.appendChild(createQueueSection());
 
                     // Log section
-                    const logSection = createLogSection();
-                    el.appendChild(logSection);
+                    el.appendChild(createLogSection());
 
-                    // Load directories
-                    loadDirectories();
+                    // Load initial state
+                    loadInitialState();
                 }
             });
 
@@ -70,362 +66,618 @@ app.registerExtension({
 
 // Store references
 let elements = {};
-let currentState = { status: "idle" };
+let state = { queue: [], logs: [], is_processing: false };
 
-function createFormSection() {
-    const section = document.createElement("div");
-    section.style.cssText = "display: flex; flex-direction: column; gap: 10px;";
+function injectStyles() {
+    if (document.getElementById('downloader-styles')) return;
 
-    // URL Input
-    const urlGroup = document.createElement("div");
-    urlGroup.innerHTML = `<label style="font-size: 12px; font-weight: 500; margin-bottom: 4px; display: block;">Download URL</label>`;
-
-    const urlInput = document.createElement("input");
-    urlInput.type = "text";
-    urlInput.id = "downloader-url";
-    urlInput.placeholder = "https://huggingface.co/... or https://civitai.com/...";
-    Object.assign(urlInput.style, {
-        width: "100%",
-        padding: "10px",
-        border: "1px solid var(--border-color, #444)",
-        borderRadius: "6px",
-        backgroundColor: "var(--input-background, #1a1a1a)",
-        color: "var(--fg-color)",
-        fontSize: "12px",
-        boxSizing: "border-box"
-    });
-    urlGroup.appendChild(urlInput);
-    elements.urlInput = urlInput;
-
-    // Platform indicator
-    const platformIndicator = document.createElement("div");
-    platformIndicator.id = "platform-indicator";
-    platformIndicator.style.cssText = "font-size: 11px; opacity: 0.7; min-height: 16px;";
-    urlGroup.appendChild(platformIndicator);
-    elements.platformIndicator = platformIndicator;
-
-    urlInput.addEventListener("input", () => {
-        const url = urlInput.value.toLowerCase();
-        if (url.includes("huggingface.co") || url.includes("hf.co")) {
-            platformIndicator.innerHTML = "🤗 <span style='color: #ffcc00;'>HuggingFace</span> detected";
-        } else if (url.includes("civitai.com")) {
-            platformIndicator.innerHTML = "🎨 <span style='color: #4cc9f0;'>CivitAI</span> detected";
-        } else if (url.length > 10) {
-            platformIndicator.innerHTML = "🌐 <span style='color: #888;'>Generic URL</span>";
-        } else {
-            platformIndicator.innerHTML = "";
+    const style = document.createElement('style');
+    style.id = 'downloader-styles';
+    style.textContent = `
+        .dl-container * {
+            box-sizing: border-box;
         }
-    });
-
-    section.appendChild(urlGroup);
-
-    // Directory dropdown
-    const dirGroup = document.createElement("div");
-    dirGroup.innerHTML = `<label style="font-size: 12px; font-weight: 500; margin-bottom: 4px; display: block;">Target Directory</label>`;
-
-    const dirSelect = document.createElement("select");
-    dirSelect.id = "downloader-directory";
-    Object.assign(dirSelect.style, {
-        width: "100%",
-        padding: "10px",
-        border: "1px solid var(--border-color, #444)",
-        borderRadius: "6px",
-        backgroundColor: "var(--input-background, #1a1a1a)",
-        color: "var(--fg-color)",
-        fontSize: "12px",
-        boxSizing: "border-box",
-        cursor: "pointer"
-    });
-    dirSelect.innerHTML = `<option value="">Loading directories...</option>`;
-    dirGroup.appendChild(dirSelect);
-    elements.dirSelect = dirSelect;
-
-    // Custom directory input (hidden by default)
-    const customDirInput = document.createElement("input");
-    customDirInput.type = "text";
-    customDirInput.id = "custom-directory";
-    customDirInput.placeholder = "Enter custom path...";
-    customDirInput.style.cssText = `
-        width: 100%; padding: 10px; margin-top: 8px;
-        border: 1px solid var(--border-color, #444);
-        border-radius: 6px; background: var(--input-background, #1a1a1a);
-        color: var(--fg-color); font-size: 12px; box-sizing: border-box;
-        display: none;
+        
+        .dl-input {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 10px;
+            background: rgba(255,255,255,0.04);
+            color: #e0e0e0;
+            font-size: 13px;
+            transition: all 0.2s ease;
+            outline: none;
+        }
+        
+        .dl-input:focus {
+            border-color: rgba(99, 102, 241, 0.6);
+            background: rgba(255,255,255,0.06);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+        }
+        
+        .dl-input::placeholder {
+            color: rgba(255,255,255,0.3);
+        }
+        
+        .dl-select {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 10px;
+            background: rgba(255,255,255,0.04);
+            color: #e0e0e0;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            outline: none;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23888' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+        }
+        
+        .dl-select:focus {
+            border-color: rgba(99, 102, 241, 0.6);
+        }
+        
+        .dl-btn {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        
+        .dl-btn-primary {
+            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+        }
+        
+        .dl-btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+        }
+        
+        .dl-btn-secondary {
+            background: rgba(255,255,255,0.06);
+            color: #a0a0a0;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .dl-btn-secondary:hover {
+            background: rgba(255,255,255,0.1);
+            color: #e0e0e0;
+        }
+        
+        .dl-btn-danger {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+        
+        .dl-btn-danger:hover {
+            background: rgba(239, 68, 68, 0.25);
+        }
+        
+        .dl-btn-success {
+            background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(34, 197, 94, 0.3);
+        }
+        
+        .dl-queue-item {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 12px;
+            padding: 14px;
+            margin-bottom: 10px;
+            transition: all 0.2s ease;
+        }
+        
+        .dl-queue-item:hover {
+            background: rgba(255,255,255,0.05);
+            border-color: rgba(255,255,255,0.1);
+        }
+        
+        .dl-queue-item.downloading {
+            border-color: rgba(99, 102, 241, 0.4);
+            box-shadow: 0 0 20px rgba(99, 102, 241, 0.1);
+        }
+        
+        .dl-queue-item.completed {
+            border-color: rgba(34, 197, 94, 0.4);
+        }
+        
+        .dl-queue-item.error {
+            border-color: rgba(239, 68, 68, 0.4);
+        }
+        
+        .dl-progress-bar {
+            width: 100%;
+            height: 6px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        
+        .dl-progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #6366f1, #8b5cf6, #a855f7);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+            background-size: 200% 100%;
+            animation: shimmer 2s linear infinite;
+        }
+        
+        @keyframes shimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        
+        .dl-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .dl-badge-hf {
+            background: rgba(255, 204, 0, 0.15);
+            color: #fcd34d;
+        }
+        
+        .dl-badge-civitai {
+            background: rgba(76, 201, 240, 0.15);
+            color: #67e8f9;
+        }
+        
+        .dl-badge-other {
+            background: rgba(156, 163, 175, 0.15);
+            color: #9ca3af;
+        }
+        
+        .dl-badge-queued {
+            background: rgba(156, 163, 175, 0.15);
+            color: #9ca3af;
+        }
+        
+        .dl-badge-downloading {
+            background: rgba(99, 102, 241, 0.2);
+            color: #a5b4fc;
+        }
+        
+        .dl-badge-completed {
+            background: rgba(34, 197, 94, 0.15);
+            color: #86efac;
+        }
+        
+        .dl-badge-error {
+            background: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+        }
+        
+        .dl-log-entry {
+            padding: 6px 0;
+            font-size: 11px;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+            word-break: break-word;
+        }
+        
+        .dl-log-time {
+            opacity: 0.4;
+            margin-right: 8px;
+        }
+        
+        .dl-section {
+            padding: 16px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .dl-section-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: rgba(255,255,255,0.4);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .dl-scrollable {
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255,255,255,0.1) transparent;
+        }
+        
+        .dl-scrollable::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .dl-scrollable::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        
+        .dl-scrollable::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.1);
+            border-radius: 3px;
+        }
+        
+        .dl-empty-state {
+            text-align: center;
+            padding: 30px 20px;
+            color: rgba(255,255,255,0.3);
+            font-size: 13px;
+        }
+        
+        .dl-platform-indicator {
+            font-size: 11px;
+            margin-top: 6px;
+            min-height: 18px;
+        }
     `;
-    dirGroup.appendChild(customDirInput);
-    elements.customDirInput = customDirInput;
+    document.head.appendChild(style);
+}
 
-    dirSelect.addEventListener("change", () => {
-        customDirInput.style.display = dirSelect.value === "custom" ? "block" : "none";
+function createHeader() {
+    const header = document.createElement('div');
+    header.className = 'dl-section';
+    header.style.cssText = 'background: linear-gradient(135deg, rgba(99,102,241,0.1) 0%, rgba(139,92,246,0.05) 100%); border-bottom: 1px solid rgba(99,102,241,0.2);';
+    header.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <div style="width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, #6366f1, #8b5cf6); display: flex; align-items: center; justify-content: center; font-size: 18px;">
+                ⬇️
+            </div>
+            <div>
+                <div style="font-size: 16px; font-weight: 700; letter-spacing: -0.3px;">Model Downloader</div>
+                <div style="font-size: 11px; opacity: 0.5; margin-top: 2px;">HuggingFace • CivitAI • Direct URLs</div>
+            </div>
+        </div>
+    `;
+    return header;
+}
+
+function createAddForm() {
+    const section = document.createElement('div');
+    section.className = 'dl-section';
+    section.innerHTML = `
+        <div class="dl-section-title">Add Download</div>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+            <div>
+                <input type="text" id="dl-url" class="dl-input" placeholder="Paste model URL here...">
+                <div id="dl-platform-indicator" class="dl-platform-indicator"></div>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <select id="dl-directory" class="dl-select" style="flex: 1;"></select>
+            </div>
+            <input type="text" id="dl-custom-dir" class="dl-input" placeholder="Custom directory path..." style="display: none;">
+            <input type="text" id="dl-filename" class="dl-input" placeholder="Custom filename (optional)">
+            <div style="display: flex; gap: 8px;">
+                <button id="dl-add-btn" class="dl-btn dl-btn-secondary" style="flex: 1;">
+                    <span>➕</span> Add to Queue
+                </button>
+                <button id="dl-add-start-btn" class="dl-btn dl-btn-primary" style="flex: 1;">
+                    <span>⚡</span> Add & Start
+                </button>
+            </div>
+        </div>
+    `;
+
+    // Store references
+    elements.urlInput = section.querySelector('#dl-url');
+    elements.platformIndicator = section.querySelector('#dl-platform-indicator');
+    elements.dirSelect = section.querySelector('#dl-directory');
+    elements.customDirInput = section.querySelector('#dl-custom-dir');
+    elements.filenameInput = section.querySelector('#dl-filename');
+
+    // Event listeners
+    elements.urlInput.addEventListener('input', updatePlatformIndicator);
+    elements.dirSelect.addEventListener('change', () => {
+        elements.customDirInput.style.display = elements.dirSelect.value === 'custom' ? 'block' : 'none';
     });
 
-    section.appendChild(dirGroup);
+    section.querySelector('#dl-add-btn').onclick = () => addToQueue(false);
+    section.querySelector('#dl-add-start-btn').onclick = () => addToQueue(true);
 
-    // Optional filename
-    const filenameGroup = document.createElement("div");
-    filenameGroup.innerHTML = `<label style="font-size: 12px; font-weight: 500; margin-bottom: 4px; display: block;">Custom Filename <span style="opacity: 0.5">(optional)</span></label>`;
-
-    const filenameInput = document.createElement("input");
-    filenameInput.type = "text";
-    filenameInput.id = "downloader-filename";
-    filenameInput.placeholder = "Auto-detect from URL";
-    Object.assign(filenameInput.style, {
-        width: "100%",
-        padding: "10px",
-        border: "1px solid var(--border-color, #444)",
-        borderRadius: "6px",
-        backgroundColor: "var(--input-background, #1a1a1a)",
-        color: "var(--fg-color)",
-        fontSize: "12px",
-        boxSizing: "border-box"
-    });
-    filenameGroup.appendChild(filenameInput);
-    elements.filenameInput = filenameInput;
-    section.appendChild(filenameGroup);
-
-    // Buttons
-    const buttonGroup = document.createElement("div");
-    buttonGroup.style.cssText = "display: flex; gap: 8px; margin-top: 4px;";
-
-    const downloadBtn = document.createElement("button");
-    downloadBtn.id = "download-btn";
-    downloadBtn.innerHTML = "⬇️ Download";
-    Object.assign(downloadBtn.style, {
-        flex: "1",
-        padding: "12px",
-        border: "none",
-        borderRadius: "6px",
-        backgroundColor: "#2563eb",
-        color: "white",
-        fontSize: "13px",
-        fontWeight: "600",
-        cursor: "pointer",
-        transition: "background-color 0.2s"
-    });
-    downloadBtn.onmouseenter = () => downloadBtn.style.backgroundColor = "#1d4ed8";
-    downloadBtn.onmouseleave = () => downloadBtn.style.backgroundColor = "#2563eb";
-    downloadBtn.onclick = startDownload;
-    elements.downloadBtn = downloadBtn;
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.id = "cancel-btn";
-    cancelBtn.innerHTML = "✖ Cancel";
-    Object.assign(cancelBtn.style, {
-        padding: "12px 16px",
-        border: "none",
-        borderRadius: "6px",
-        backgroundColor: "#dc2626",
-        color: "white",
-        fontSize: "13px",
-        fontWeight: "600",
-        cursor: "pointer",
-        display: "none",
-        transition: "background-color 0.2s"
-    });
-    cancelBtn.onmouseenter = () => cancelBtn.style.backgroundColor = "#b91c1c";
-    cancelBtn.onmouseleave = () => cancelBtn.style.backgroundColor = "#dc2626";
-    cancelBtn.onclick = cancelDownload;
-    elements.cancelBtn = cancelBtn;
-
-    buttonGroup.appendChild(downloadBtn);
-    buttonGroup.appendChild(cancelBtn);
-    section.appendChild(buttonGroup);
+    // Load directories
+    loadDirectories();
 
     return section;
 }
 
-function createProgressSection() {
-    const section = document.createElement("div");
-    section.id = "progress-section";
-    section.style.cssText = "display: none; padding: 12px; background: var(--bg-secondary, #252525); border-radius: 8px;";
-
+function createQueueSection() {
+    const section = document.createElement('div');
+    section.className = 'dl-section';
+    section.style.cssText = 'flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden;';
     section.innerHTML = `
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <span id="progress-filename" style="font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;"></span>
-            <span id="progress-platform" style="font-size: 11px; padding: 2px 8px; border-radius: 4px; background: #333;"></span>
+        <div class="dl-section-title">
+            <span>Download Queue <span id="dl-queue-count" style="opacity: 0.5;">(0)</span></span>
+            <div style="display: flex; gap: 6px;">
+                <button id="dl-start-btn" class="dl-btn dl-btn-success" style="padding: 6px 12px; font-size: 11px;">▶ Start</button>
+                <button id="dl-clear-btn" class="dl-btn dl-btn-secondary" style="padding: 6px 12px; font-size: 11px;">Clear Done</button>
+            </div>
         </div>
-        <div style="width: 100%; height: 8px; background: #333; border-radius: 4px; overflow: hidden; margin-bottom: 8px;">
-            <div id="progress-bar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #2563eb, #4cc9f0); transition: width 0.3s; border-radius: 4px;"></div>
-        </div>
-        <div style="display: flex; justify-content: space-between; font-size: 11px; opacity: 0.8;">
-            <span id="progress-percent">0%</span>
-            <span id="progress-speed"></span>
-            <span id="progress-eta"></span>
-        </div>
-        <div id="progress-message" style="margin-top: 8px; font-size: 12px; opacity: 0.9;"></div>
+        <div id="dl-queue-list" class="dl-scrollable" style="flex: 1; min-height: 0;"></div>
     `;
 
-    elements.progressSection = section;
+    elements.queueCount = section.querySelector('#dl-queue-count');
+    elements.queueList = section.querySelector('#dl-queue-list');
+    elements.startBtn = section.querySelector('#dl-start-btn');
+    elements.clearBtn = section.querySelector('#dl-clear-btn');
+
+    elements.startBtn.onclick = startQueue;
+    elements.clearBtn.onclick = clearCompleted;
+
     return section;
 }
 
 function createLogSection() {
-    const section = document.createElement("div");
-    section.style.cssText = "flex: 1; min-height: 100px; display: flex; flex-direction: column;";
-
+    const section = document.createElement('div');
+    section.style.cssText = 'height: 150px; display: flex; flex-direction: column; border-top: 1px solid rgba(255,255,255,0.05);';
     section.innerHTML = `
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-            <span style="font-size: 12px; font-weight: 500;">Log</span>
-            <button id="clear-log-btn" style="font-size: 10px; padding: 2px 8px; border: none; background: transparent; color: var(--fg-color); opacity: 0.6; cursor: pointer;">Clear</button>
+        <div class="dl-section-title" style="padding: 12px 16px 8px;">
+            <span>Activity Log</span>
+            <button id="dl-clear-log-btn" style="background: transparent; border: none; color: rgba(255,255,255,0.4); font-size: 10px; cursor: pointer;">Clear</button>
         </div>
+        <div id="dl-log-container" class="dl-scrollable" style="flex: 1; padding: 0 16px 12px; min-height: 0;"></div>
     `;
 
-    const logContainer = document.createElement("div");
-    logContainer.id = "log-container";
-    Object.assign(logContainer.style, {
-        flex: "1",
-        minHeight: "80px",
-        maxHeight: "150px",
-        overflowY: "auto",
-        padding: "8px",
-        background: "var(--bg-secondary, #1a1a1a)",
-        borderRadius: "6px",
-        fontSize: "11px",
-        fontFamily: "monospace",
-        lineHeight: "1.5"
-    });
-    section.appendChild(logContainer);
-    elements.logContainer = logContainer;
-
-    section.querySelector("#clear-log-btn").onclick = () => {
-        logContainer.innerHTML = "";
-    };
+    elements.logContainer = section.querySelector('#dl-log-container');
+    section.querySelector('#dl-clear-log-btn').onclick = clearLogs;
 
     return section;
 }
 
-async function loadDirectories() {
-    try {
-        const response = await api.fetchApi("/downloader/directories");
-        const data = await response.json();
+function updatePlatformIndicator() {
+    const url = elements.urlInput.value.toLowerCase();
+    const indicator = elements.platformIndicator;
 
-        const select = elements.dirSelect;
-        select.innerHTML = "";
-
-        const defaultOption = document.createElement("option");
-        defaultOption.value = "";
-        defaultOption.textContent = "-- Select Directory --";
-        select.appendChild(defaultOption);
-
-        for (const [name, path] of Object.entries(data.directories)) {
-            const option = document.createElement("option");
-            option.value = path;
-            option.textContent = name.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
-            select.appendChild(option);
-        }
-
-        const customOption = document.createElement("option");
-        customOption.value = "custom";
-        customOption.textContent = "📁 Custom Directory...";
-        select.appendChild(customOption);
-
-    } catch (e) {
-        console.error("Failed to load directories:", e);
-        elements.dirSelect.innerHTML = `<option value="">Error loading directories</option>`;
+    if (url.includes('huggingface.co') || url.includes('hf.co')) {
+        indicator.innerHTML = `<span class="dl-badge dl-badge-hf">🤗 HuggingFace</span>`;
+    } else if (url.includes('civitai.com')) {
+        indicator.innerHTML = `<span class="dl-badge dl-badge-civitai">🎨 CivitAI</span>`;
+    } else if (url.length > 15) {
+        indicator.innerHTML = `<span class="dl-badge dl-badge-other">🌐 Direct URL</span>`;
+    } else {
+        indicator.innerHTML = '';
     }
 }
 
-async function startDownload() {
+async function loadDirectories() {
+    try {
+        const response = await api.fetchApi('/downloader/directories');
+        const data = await response.json();
+
+        const select = elements.dirSelect;
+        select.innerHTML = '<option value="">Select directory...</option>';
+
+        for (const [name, path] of Object.entries(data.directories)) {
+            const option = document.createElement('option');
+            option.value = path;
+            option.textContent = name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+            select.appendChild(option);
+        }
+
+        const customOption = document.createElement('option');
+        customOption.value = 'custom';
+        customOption.textContent = '📁 Custom Path...';
+        select.appendChild(customOption);
+
+    } catch (e) {
+        console.error('Failed to load directories:', e);
+    }
+}
+
+async function loadInitialState() {
+    try {
+        const response = await api.fetchApi('/downloader/state');
+        const data = await response.json();
+        updateQueueUI(data);
+
+        // Restore logs
+        if (data.logs) {
+            data.logs.forEach(log => addLogEntry(log, false));
+        }
+    } catch (e) {
+        console.error('Failed to load state:', e);
+    }
+}
+
+async function addToQueue(autoStart) {
     const url = elements.urlInput.value.trim();
     let directory = elements.dirSelect.value;
     const filename = elements.filenameInput.value.trim();
 
     if (!url) {
-        addLog({ message: "Please enter a URL", level: "error" });
+        addLogEntry({ message: 'Please enter a URL', level: 'error' });
         return;
     }
 
-    if (directory === "custom") {
+    if (directory === 'custom') {
         directory = elements.customDirInput.value.trim();
     }
 
     if (!directory) {
-        addLog({ message: "Please select a directory", level: "error" });
+        addLogEntry({ message: 'Please select a directory', level: 'error' });
         return;
     }
 
     try {
-        const response = await api.fetchApi("/downloader/start", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url, directory, filename })
+        await api.fetchApi('/downloader/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, directory, filename: filename || null })
         });
 
-        const result = await response.json();
+        // Clear inputs
+        elements.urlInput.value = '';
+        elements.filenameInput.value = '';
+        elements.platformIndicator.innerHTML = '';
 
-        if (result.error) {
-            addLog({ message: result.error, level: "error" });
-        } else {
-            setDownloadingUI(true);
+        if (autoStart) {
+            startQueue();
         }
+
     } catch (e) {
-        addLog({ message: `Failed to start: ${e.message}`, level: "error" });
+        addLogEntry({ message: `Failed to add: ${e.message}`, level: 'error' });
+    }
+}
+
+async function startQueue() {
+    try {
+        await api.fetchApi('/downloader/start', { method: 'POST' });
+    } catch (e) {
+        console.error('Failed to start:', e);
     }
 }
 
 async function cancelDownload() {
     try {
-        await api.fetchApi("/downloader/cancel", { method: "POST" });
+        await api.fetchApi('/downloader/cancel', { method: 'POST' });
     } catch (e) {
-        console.error("Cancel failed:", e);
+        console.error('Failed to cancel:', e);
     }
 }
 
-function setDownloadingUI(downloading) {
-    elements.downloadBtn.style.display = downloading ? "none" : "block";
-    elements.cancelBtn.style.display = downloading ? "block" : "none";
-    elements.progressSection.style.display = downloading ? "block" : "none";
-
-    elements.urlInput.disabled = downloading;
-    elements.dirSelect.disabled = downloading;
-    elements.filenameInput.disabled = downloading;
-}
-
-function updateUI(state) {
-    currentState = state;
-
-    if (state.status === "downloading") {
-        setDownloadingUI(true);
-
-        document.getElementById("progress-filename").textContent = state.filename || "Downloading...";
-        document.getElementById("progress-platform").textContent = state.platform?.toUpperCase() || "";
-        document.getElementById("progress-bar").style.width = `${state.progress || 0}%`;
-        document.getElementById("progress-percent").textContent = `${state.progress || 0}%`;
-        document.getElementById("progress-speed").textContent = state.speed || "";
-        document.getElementById("progress-eta").textContent = state.eta ? `ETA: ${state.eta}` : "";
-        document.getElementById("progress-message").textContent = state.message || "";
-
-    } else if (state.status === "completed" || state.status === "error" || state.status === "cancelled") {
-        document.getElementById("progress-bar").style.width = state.status === "completed" ? "100%" : "0%";
-        document.getElementById("progress-message").textContent = state.message || state.status;
-
-        // Reset UI after delay
-        setTimeout(() => {
-            setDownloadingUI(false);
-        }, 2000);
-
-    } else if (state.status === "idle") {
-        setDownloadingUI(false);
+async function removeItem(id) {
+    try {
+        await api.fetchApi('/downloader/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id })
+        });
+    } catch (e) {
+        console.error('Failed to remove:', e);
     }
 }
 
-function addLog(data) {
-    const container = elements.logContainer;
-    if (!container) return;
+async function clearCompleted() {
+    try {
+        await api.fetchApi('/downloader/clear', { method: 'POST' });
+    } catch (e) {
+        console.error('Failed to clear:', e);
+    }
+}
 
-    const entry = document.createElement("div");
-    entry.style.cssText = "margin-bottom: 4px; word-break: break-word;";
+async function clearLogs() {
+    try {
+        await api.fetchApi('/downloader/clear-logs', { method: 'POST' });
+        elements.logContainer.innerHTML = '';
+    } catch (e) {
+        console.error('Failed to clear logs:', e);
+    }
+}
+
+function updateQueueUI(data) {
+    state = data;
+
+    // Update button states
+    if (data.is_processing) {
+        elements.startBtn.innerHTML = '⏹ Stop';
+        elements.startBtn.className = 'dl-btn dl-btn-danger';
+        elements.startBtn.onclick = cancelDownload;
+    } else {
+        elements.startBtn.innerHTML = '▶ Start';
+        elements.startBtn.className = 'dl-btn dl-btn-success';
+        elements.startBtn.onclick = startQueue;
+    }
+
+    // Update queue count
+    elements.queueCount.textContent = `(${data.queue.length})`;
+
+    // Render queue items
+    if (data.queue.length === 0) {
+        elements.queueList.innerHTML = `
+            <div class="dl-empty-state">
+                <div style="font-size: 32px; margin-bottom: 10px; opacity: 0.3;">📭</div>
+                <div>Queue is empty</div>
+                <div style="font-size: 11px; margin-top: 4px; opacity: 0.5;">Add URLs above to start downloading</div>
+            </div>
+        `;
+        return;
+    }
+
+    elements.queueList.innerHTML = data.queue.map(item => {
+        const platformClass = item.platform === 'huggingface' ? 'dl-badge-hf' :
+            item.platform === 'civitai' ? 'dl-badge-civitai' : 'dl-badge-other';
+        const statusClass = `dl-badge-${item.status}`;
+        const itemClass = item.status;
+
+        const filename = item.detected_filename || item.filename || 'Detecting...';
+        const displayUrl = item.url.length > 50 ? item.url.substring(0, 50) + '...' : item.url;
+
+        return `
+            <div class="dl-queue-item ${itemClass}" data-id="${item.id}">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+                    <div style="flex: 1; min-width: 0;">
+                        <div style="font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${filename}</div>
+                        <div style="font-size: 10px; opacity: 0.4; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${displayUrl}</div>
+                    </div>
+                    <button class="dl-remove-btn" style="background: transparent; border: none; color: rgba(255,255,255,0.3); cursor: pointer; padding: 4px; font-size: 14px;">&times;</button>
+                </div>
+                <div style="display: flex; gap: 6px; margin-bottom: 8px;">
+                    <span class="dl-badge ${platformClass}">${item.platform}</span>
+                    <span class="dl-badge ${statusClass}">${item.status}</span>
+                </div>
+                ${item.status === 'downloading' ? `
+                    <div class="dl-progress-bar">
+                        <div class="dl-progress-fill" style="width: ${item.progress}%;"></div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; font-size: 10px; opacity: 0.6;">
+                        <span>${item.progress}%</span>
+                        <span>${item.speed || ''}</span>
+                        <span>${item.eta ? 'ETA: ' + item.eta : ''}</span>
+                    </div>
+                ` : ''}
+                <div style="font-size: 11px; opacity: 0.6; margin-top: 6px;">${item.message || ''}</div>
+            </div>
+        `;
+    }).join('');
+
+    // Add remove handlers
+    elements.queueList.querySelectorAll('.dl-remove-btn').forEach(btn => {
+        btn.onclick = (e) => {
+            const id = e.target.closest('.dl-queue-item').dataset.id;
+            removeItem(id);
+        };
+    });
+}
+
+function addLogEntry(data, scroll = true) {
+    if (!elements.logContainer) return;
 
     const colors = {
-        error: "#ef4444",
-        warning: "#f59e0b",
-        success: "#22c55e",
-        info: "#888"
+        error: '#f87171',
+        warning: '#fbbf24',
+        success: '#4ade80',
+        info: 'rgba(255,255,255,0.6)'
     };
 
-    const time = data.timestamp || new Date().toLocaleTimeString().slice(0, 5);
-    entry.innerHTML = `<span style="opacity: 0.5;">[${time}]</span> <span style="color: ${colors[data.level] || colors.info}">${data.message}</span>`;
+    const entry = document.createElement('div');
+    entry.className = 'dl-log-entry';
+    entry.innerHTML = `
+        <span class="dl-log-time">[${data.timestamp || new Date().toLocaleTimeString().slice(0, 5)}]</span>
+        <span style="color: ${colors[data.level] || colors.info}">${data.message}</span>
+    `;
 
-    container.appendChild(entry);
-    container.scrollTop = container.scrollHeight;
+    elements.logContainer.appendChild(entry);
+
+    if (scroll) {
+        elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
+    }
 }
