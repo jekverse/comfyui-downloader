@@ -321,7 +321,8 @@ async def api_add(request):
         data = await request.json()
         url = data.get("url", "").strip()
         directory = data.get("directory", "").strip()
-        filename = data.get("filename", "").strip() or None
+        filename_raw = data.get("filename")
+        filename = filename_raw.strip() if filename_raw else None
         
         if not url:
             return web.json_response({"error": "URL required"}, status=400)
