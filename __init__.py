@@ -412,4 +412,71 @@ async def api_state(request):
             "logs": persistent_logs[-50:]
         })
 
+# =============================================
+# TEMPLATE API
+# =============================================
+
+def get_templates_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+
+@PromptServer.instance.routes.get("/downloader/templates")
+async def api_list_templates(request):
+    """List all available template files."""
+    templates_dir = get_templates_dir()
+    templates = []
+    
+    if os.path.exists(templates_dir):
+        for filename in os.listdir(templates_dir):
+            if filename.endswith('.json'):
+                filepath = os.path.join(templates_dir, filename)
+                try:
+                    import json
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    templates.append({
+                        "filename": filename,
+                        "name": data.get("name", filename.replace('.json', '')),
+                        "description": data.get("description", ""),
+                        "count": len(data.get("downloads", []))
+                    })
+                except Exception as e:
+                    templates.append({
+                        "filename": filename,
+                        "name": filename.replace('.json', ''),
+                        "description": f"Error: {str(e)}",
+                        "count": 0
+                    })
+    
+    return web.json_response({"templates": templates})
+
+@PromptServer.instance.routes.get("/downloader/template/{filename}")
+async def api_get_template(request):
+    """Get the content of a specific template."""
+    filename = request.match_info.get('filename', '')
+    
+    if not filename.endswith('.json'):
+        filename += '.json'
+    
+    templates_dir = get_templates_dir()
+    filepath = os.path.join(templates_dir, filename)
+    
+    if not os.path.exists(filepath):
+        return web.json_response({"error": "Template not found"}, status=404)
+    
+    try:
+        import json
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # Resolve directory names to full paths
+        directories = get_model_directories()
+        for download in data.get("downloads", []):
+            dir_key = download.get("directory", "")
+            if dir_key in directories:
+                download["directory"] = directories[dir_key]
+        
+        return web.json_response(data)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
 print("[Downloader] Loaded - aria2 powered")

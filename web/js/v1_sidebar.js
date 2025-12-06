@@ -224,6 +224,63 @@ function injectStyles() {
             border-bottom: 1px solid rgba(255,255,255,0.03);
             word-break: break-all;
         }
+        .dl-modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+        }
+        .dl-modal {
+            background: #1a1a1f;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 20px;
+            min-width: 300px;
+            max-width: 400px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .dl-modal-title {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .dl-template-item {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .dl-template-item:hover {
+            border-color: rgba(99,102,241,0.5);
+            background: rgba(99,102,241,0.1);
+        }
+        .dl-template-name {
+            font-weight: 600;
+            font-size: 13px;
+        }
+        .dl-template-desc {
+            font-size: 11px;
+            opacity: 0.5;
+            margin-top: 4px;
+        }
+        .dl-template-count {
+            font-size: 10px;
+            color: #a5b4fc;
+            margin-top: 4px;
+        }
     `;
     document.head.appendChild(style);
 }
@@ -260,6 +317,7 @@ function createAddForm() {
                 <button id="dl-add-btn" class="dl-btn dl-btn-secondary" style="flex:1;">➕ Add to Queue</button>
                 <button id="dl-add-start-btn" class="dl-btn dl-btn-primary" style="flex:1;">⚡ Add & Start</button>
             </div>
+            <button id="dl-template-btn" class="dl-btn dl-btn-secondary" style="width:100%;">📋 From Template</button>
         </div>
     `;
 
@@ -271,12 +329,30 @@ function createAddForm() {
 
     // URL change handler
     elements.urlInput.addEventListener('input', () => {
-        const url = elements.urlInput.value.toLowerCase();
-        if (url.includes('huggingface.co') || url.includes('hf.co')) {
+        const url = elements.urlInput.value;
+        const urlLower = url.toLowerCase();
+
+        if (urlLower.includes('huggingface.co') || urlLower.includes('hf.co')) {
             elements.platformDiv.innerHTML = '<span class="dl-badge dl-badge-hf">🤗 HuggingFace</span>';
-        } else if (url.includes('civitai.com')) {
+
+            try {
+                // Auto-extract filename for HuggingFace
+                // Remove query parameters
+                const cleanUrl = url.split('?')[0];
+                const parts = cleanUrl.split('/');
+                const filename = parts[parts.length - 1];
+
+                // Only update if we found a potential filename
+                if (filename && filename.includes('.') && elements.filenameInput.value === '') {
+                    elements.filenameInput.value = filename;
+                }
+            } catch (e) {
+                console.warn('Failed to extract filename from HF URL', e);
+            }
+
+        } else if (urlLower.includes('civitai.com')) {
             elements.platformDiv.innerHTML = '<span class="dl-badge dl-badge-civitai">🎨 CivitAI</span>';
-        } else if (url.length > 10) {
+        } else if (urlLower.length > 10) {
             elements.platformDiv.innerHTML = '<span class="dl-badge dl-badge-other">🌐 Direct URL</span>';
         } else {
             elements.platformDiv.innerHTML = '';
@@ -291,6 +367,7 @@ function createAddForm() {
     // Button handlers
     div.querySelector('#dl-add-btn').onclick = () => addDownload(false);
     div.querySelector('#dl-add-start-btn').onclick = () => addDownload(true);
+    div.querySelector('#dl-template-btn').onclick = () => showTemplateModal();
 
     // Load directories
     loadDirectories();
@@ -569,4 +646,134 @@ function addLogEntry(log) {
 
     elements.logContainer.appendChild(entry);
     elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
+}
+
+// =============================================
+// TEMPLATE MODAL
+// =============================================
+
+async function showTemplateModal() {
+    // Create overlay
+    const overlay = document.createElement('div');
+    overlay.className = 'dl-modal-overlay';
+    overlay.onclick = (e) => {
+        if (e.target === overlay) overlay.remove();
+    };
+
+    const modal = document.createElement('div');
+    modal.className = 'dl-modal';
+    modal.innerHTML = `
+        <div class="dl-modal-title">
+            <span>📋 Select Template</span>
+            <button id="dl-modal-close" style="background:none; border:none; color:#fff; font-size:18px; cursor:pointer;">×</button>
+        </div>
+        <div id="dl-template-list" style="min-height:100px;">
+            <div style="text-align:center; padding:20px; opacity:0.5;">Loading templates...</div>
+        </div>
+    `;
+
+    modal.querySelector('#dl-modal-close').onclick = () => overlay.remove();
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    // Load templates
+    try {
+        const res = await api.fetchApi('/downloader/templates');
+        const data = await res.json();
+        const listEl = modal.querySelector('#dl-template-list');
+
+        if (!data.templates || data.templates.length === 0) {
+            listEl.innerHTML = `
+                <div style="text-align:center; padding:20px; opacity:0.5;">
+                    <div style="font-size:24px; margin-bottom:8px;">📭</div>
+                    <div>No templates found</div>
+                    <div style="font-size:10px; margin-top:4px;">Add .json files to templates/ folder</div>
+                </div>
+            `;
+            return;
+        }
+
+        listEl.innerHTML = data.templates.map(t => `
+            <div class="dl-template-item" data-filename="${t.filename}">
+                <div class="dl-template-name">${t.name}</div>
+                ${t.description ? `<div class="dl-template-desc">${t.description}</div>` : ''}
+                <div class="dl-template-count">${t.count} download(s)</div>
+            </div>
+        `).join('');
+
+        // Add click handlers
+        listEl.querySelectorAll('.dl-template-item').forEach(item => {
+            item.onclick = async () => {
+                const filename = item.dataset.filename;
+                await loadTemplateItems(filename);
+                overlay.remove();
+            };
+        });
+
+    } catch (e) {
+        console.error('Failed to load templates:', e);
+        modal.querySelector('#dl-template-list').innerHTML = `
+            <div style="text-align:center; padding:20px; color:#f87171;">
+                Failed to load templates
+            </div>
+        `;
+    }
+}
+
+async function loadTemplateItems(filename) {
+    try {
+        const res = await api.fetchApi(`/downloader/template/${filename}`);
+        const data = await res.json();
+
+        if (data.error) {
+            alert('Error: ' + data.error);
+            return;
+        }
+
+        const downloads = data.downloads || [];
+
+        for (const dl of downloads) {
+            // Auto-extract filename from URL if not specified
+            let extractedFilename = dl.filename || null;
+            if (!extractedFilename) {
+                extractedFilename = extractFilenameFromUrl(dl.url);
+            }
+
+            await api.fetchApi('/downloader/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    url: dl.url,
+                    directory: dl.directory,
+                    filename: extractedFilename
+                })
+            });
+        }
+
+        alert(`Added ${downloads.length} item(s) from template "${data.name}"`);
+
+    } catch (e) {
+        console.error('Failed to load template:', e);
+        alert('Failed to load template: ' + e.message);
+    }
+}
+
+/**
+ * Extract filename from URL (works for HuggingFace and similar URLs)
+ */
+function extractFilenameFromUrl(url) {
+    try {
+        // Remove query parameters
+        const cleanUrl = url.split('?')[0];
+        const parts = cleanUrl.split('/');
+        const filename = parts[parts.length - 1];
+
+        // Return if it looks like a valid filename
+        if (filename && filename.includes('.')) {
+            return filename;
+        }
+    } catch (e) {
+        console.warn('Failed to extract filename from URL:', e);
+    }
+    return null;
 }
