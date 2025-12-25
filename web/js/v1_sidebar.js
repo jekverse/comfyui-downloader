@@ -4,9 +4,10 @@ import { api } from "../../scripts/api.js";
 // Global state - persists across tab open/close
 let globalState = {
     queue: [],
-    logs: [],
-    is_processing: false
+    is_processing: false,
+    is_add_collapsed: false
 };
+
 let elements = {};
 
 app.registerExtension({
@@ -17,16 +18,6 @@ app.registerExtension({
             globalState = event.detail;
             if (elements.queueList) {
                 renderQueue();
-            }
-        });
-
-        api.addEventListener("downloader.log", (event) => {
-            globalState.logs.push(event.detail);
-            if (globalState.logs.length > 100) {
-                globalState.logs = globalState.logs.slice(-100);
-            }
-            if (elements.logContainer) {
-                addLogEntry(event.detail);
             }
         });
 
@@ -59,11 +50,15 @@ app.registerExtension({
                     // Inject styles
                     injectStyles();
 
+                    // Main Container
+                    const container = document.createElement('div');
+                    container.style.cssText = 'flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden;';
+                    el.appendChild(container);
+
                     // Build UI
-                    el.appendChild(createHeader());
-                    el.appendChild(createAddForm());
-                    el.appendChild(createQueueSection());
-                    el.appendChild(createLogSection());
+                    container.appendChild(createHeader());
+                    container.appendChild(createAddForm());
+                    container.appendChild(createQueueSection());
 
                     // Load state from server
                     loadState();
@@ -217,13 +212,7 @@ function injectStyles() {
         .dl-scrollable::-webkit-scrollbar { width: 5px; }
         .dl-scrollable::-webkit-scrollbar-track { background: transparent; }
         .dl-scrollable::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
-        .dl-log-entry {
-            font-size: 11px;
-            font-family: monospace;
-            padding: 4px 0;
-            border-bottom: 1px solid rgba(255,255,255,0.03);
-            word-break: break-all;
-        }
+        .dl-scrollable::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
         .dl-modal-overlay {
             position: fixed;
             top: 0;
@@ -302,30 +291,65 @@ function createHeader() {
 }
 
 function createAddForm() {
-    const div = document.createElement('div');
-    div.className = 'dl-section';
+    const container = document.createElement('div');
+    container.className = 'dl-section';
+    container.style.display = 'flex';
+    container.style.flexDirection = 'column';
+    container.style.gap = '12px';
 
-    div.innerHTML = `
-        <div class="dl-label">Add Download</div>
-        <div style="display:flex; flex-direction:column; gap:10px;">
-            <input type="text" id="dl-url" class="dl-input" placeholder="Paste model URL here...">
-            <div id="dl-platform" style="font-size:11px; min-height:16px;"></div>
-            <select id="dl-dir" class="dl-select"></select>
-            <input type="text" id="dl-custom-dir" class="dl-input" placeholder="Custom directory path..." style="display:none;">
-            <input type="text" id="dl-filename" class="dl-input" placeholder="Custom filename (optional)">
-            <div style="display:flex; gap:8px;">
-                <button id="dl-add-btn" class="dl-btn dl-btn-secondary" style="flex:1;">➕ Add to Queue</button>
-                <button id="dl-add-start-btn" class="dl-btn dl-btn-primary" style="flex:1;">⚡ Add & Start</button>
-            </div>
-            <button id="dl-template-btn" class="dl-btn dl-btn-secondary" style="width:100%;">📋 From Template</button>
-        </div>
+    // Header
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex; justify-content:space-between; align-items:center; cursor:pointer; user-select:none;';
+    header.innerHTML = `
+        <div class="dl-label" style="margin:0;">Add Download</div>
+        <div id="dl-add-toggle" style="font-size:12px; transition:transform 0.2s; color:rgba(255,255,255,0.5);">▼</div>
     `;
 
-    elements.urlInput = div.querySelector('#dl-url');
-    elements.platformDiv = div.querySelector('#dl-platform');
-    elements.dirSelect = div.querySelector('#dl-dir');
-    elements.customDirInput = div.querySelector('#dl-custom-dir');
-    elements.filenameInput = div.querySelector('#dl-filename');
+    // Content wrapper
+    const content = document.createElement('div');
+    content.style.cssText = 'display:flex; flex-direction:column; gap:10px; overflow:hidden;';
+
+    content.innerHTML = `
+        <input type="text" id="dl-url" class="dl-input" placeholder="Paste model URL here...">
+        <div id="dl-platform" style="font-size:11px; min-height:16px;"></div>
+        <select id="dl-dir" class="dl-select"></select>
+        <input type="text" id="dl-custom-dir" class="dl-input" placeholder="Custom directory path..." style="display:none;">
+        <input type="text" id="dl-filename" class="dl-input" placeholder="Custom filename (optional)">
+        <div style="display:flex; gap:8px;">
+            <button id="dl-add-btn" class="dl-btn dl-btn-secondary" style="flex:1;">➕ Add to Queue</button>
+            <button id="dl-add-start-btn" class="dl-btn dl-btn-primary" style="flex:1;">⚡ Add & Start</button>
+        </div>
+        <button id="dl-template-btn" class="dl-btn dl-btn-secondary" style="width:100%;">📋 From Template</button>
+    `;
+
+    container.appendChild(header);
+    container.appendChild(content);
+
+    elements.urlInput = content.querySelector('#dl-url');
+    elements.platformDiv = content.querySelector('#dl-platform');
+    elements.dirSelect = content.querySelector('#dl-dir');
+    elements.customDirInput = content.querySelector('#dl-custom-dir');
+    elements.filenameInput = content.querySelector('#dl-filename');
+
+    // Toggle logic
+    const updateVisibility = () => {
+        const toggleBtn = header.querySelector('#dl-add-toggle');
+        if (globalState.is_add_collapsed) {
+            content.style.display = 'none';
+            toggleBtn.style.transform = 'rotate(-90deg)';
+        } else {
+            content.style.display = 'flex';
+            toggleBtn.style.transform = 'rotate(0deg)';
+        }
+    };
+
+    header.onclick = () => {
+        globalState.is_add_collapsed = !globalState.is_add_collapsed;
+        updateVisibility();
+    };
+
+    // Initial state
+    updateVisibility();
 
     // URL change handler
     elements.urlInput.addEventListener('input', () => {
@@ -365,14 +389,14 @@ function createAddForm() {
     });
 
     // Button handlers
-    div.querySelector('#dl-add-btn').onclick = () => addDownload(false);
-    div.querySelector('#dl-add-start-btn').onclick = () => addDownload(true);
-    div.querySelector('#dl-template-btn').onclick = () => showTemplateModal();
+    container.querySelector('#dl-add-btn').onclick = () => addDownload(false);
+    container.querySelector('#dl-add-start-btn').onclick = () => addDownload(true);
+    container.querySelector('#dl-template-btn').onclick = () => showTemplateModal();
 
     // Load directories
     loadDirectories();
 
-    return div;
+    return container;
 }
 
 function createQueueSection() {
@@ -385,6 +409,7 @@ function createQueueSection() {
             <div class="dl-label" style="margin:0;">Queue <span id="dl-count">(0)</span></div>
             <div style="display:flex; gap:6px;">
                 <button id="dl-start-btn" class="dl-btn dl-btn-success" style="padding:6px 12px; font-size:11px;">▶ Start</button>
+                <button id="dl-save-btn" class="dl-btn dl-btn-secondary" style="padding:6px 12px; font-size:11px;">💾 Save</button>
                 <button id="dl-clear-btn" class="dl-btn dl-btn-secondary" style="padding:6px 12px; font-size:11px;">Clear</button>
             </div>
         </div>
@@ -394,30 +419,79 @@ function createQueueSection() {
     elements.queueCount = div.querySelector('#dl-count');
     elements.queueList = div.querySelector('#dl-queue');
     elements.startBtn = div.querySelector('#dl-start-btn');
+    elements.saveBtn = div.querySelector('#dl-save-btn');
     elements.clearBtn = div.querySelector('#dl-clear-btn');
 
     elements.startBtn.onclick = startQueue;
+    elements.saveBtn.onclick = showSaveTemplateModal;
     elements.clearBtn.onclick = clearCompleted;
 
     return div;
 }
 
-function createLogSection() {
-    const div = document.createElement('div');
-    div.style.cssText = 'height:130px; display:flex; flex-direction:column; border-top:1px solid rgba(255,255,255,0.06);';
+function showSaveTemplateModal() {
+    if (!globalState.queue || !globalState.queue.length) {
+        alert("Queue is empty! Add downloads first to save as template.");
+        return;
+    }
 
-    div.innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 16px 6px;">
-            <div class="dl-label" style="margin:0;">Log</div>
-            <button id="dl-clear-log" style="background:none; border:none; color:rgba(255,255,255,0.4); font-size:10px; cursor:pointer;">Clear</button>
+    const overlay = document.createElement('div');
+    overlay.className = 'dl-modal-overlay';
+
+    const modal = document.createElement('div');
+    modal.className = 'dl-modal';
+    modal.innerHTML = `
+        <div class="dl-modal-title">💾 Save Queue as Template</div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            <div style="font-size:12px; opacity:0.7; margin-bottom:5px;">
+                Saving ${globalState.queue.length} item(s) to a new template.
+            </div>
+            <input type="text" id="tpl-name" class="dl-input" placeholder="Template Name">
+            <input type="text" id="tpl-desc" class="dl-input" placeholder="Description (optional)">
+            <div style="display:flex; gap:8px; margin-top:10px;">
+                <button id="tpl-cancel" class="dl-btn dl-btn-secondary" style="flex:1;">Cancel</button>
+                <button id="tpl-confirm" class="dl-btn dl-btn-primary" style="flex:1;">Save</button>
+            </div>
         </div>
-        <div id="dl-logs" class="dl-scrollable" style="flex:1; padding:0 16px 10px; min-height:0;"></div>
     `;
 
-    elements.logContainer = div.querySelector('#dl-logs');
-    div.querySelector('#dl-clear-log').onclick = clearLogs;
+    modal.querySelector('#tpl-cancel').onclick = () => overlay.remove();
+    modal.querySelector('#tpl-confirm').onclick = async () => {
+        const name = modal.querySelector('#tpl-name').value.trim();
+        const desc = modal.querySelector('#tpl-desc').value.trim();
 
-    return div;
+        if (!name) {
+            alert("Name is required");
+            return;
+        }
+
+        // Extract items from queue
+        const downloads = globalState.queue.map(item => ({
+            url: item.url,
+            directory: item.directory,
+            filename: item.filename || item.detected_filename || null
+        }));
+
+        try {
+            await api.fetchApi('/downloader/save-template', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name,
+                    description: desc,
+                    downloads
+                })
+            });
+
+            alert("Template saved!");
+            overlay.remove();
+        } catch (e) {
+            alert("Save failed: " + e.message);
+        }
+    };
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
 }
 
 async function loadDirectories() {
@@ -452,11 +526,7 @@ async function loadState() {
 
         renderQueue();
 
-        // Restore logs
-        if (elements.logContainer && data.logs) {
-            elements.logContainer.innerHTML = '';
-            data.logs.forEach(log => addLogEntry(log));
-        }
+        renderQueue();
     } catch (e) {
         console.error('Load state failed:', e);
     }
@@ -538,17 +608,7 @@ async function clearCompleted() {
     }
 }
 
-async function clearLogs() {
-    try {
-        await api.fetchApi('/downloader/clear-logs', { method: 'POST' });
-        if (elements.logContainer) {
-            elements.logContainer.innerHTML = '';
-        }
-        globalState.logs = [];
-    } catch (e) {
-        console.error('Clear logs failed:', e);
-    }
-}
+
 
 function renderQueue() {
     if (!elements.queueList) return;
@@ -627,26 +687,7 @@ function renderQueue() {
     });
 }
 
-function addLogEntry(log) {
-    if (!elements.logContainer) return;
 
-    const colors = {
-        error: '#f87171',
-        warning: '#fbbf24',
-        success: '#4ade80',
-        info: 'rgba(255,255,255,0.6)'
-    };
-
-    const entry = document.createElement('div');
-    entry.className = 'dl-log-entry';
-    entry.innerHTML = `
-        <span style="opacity:0.4;">[${log.timestamp || '--:--'}]</span>
-        <span style="color:${colors[log.level] || colors.info}">${log.message}</span>
-    `;
-
-    elements.logContainer.appendChild(entry);
-    elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
-}
 
 // =============================================
 // TEMPLATE MODAL
@@ -753,27 +794,17 @@ async function loadTemplateItems(filename) {
         alert(`Added ${downloads.length} item(s) from template "${data.name}"`);
 
     } catch (e) {
-        console.error('Failed to load template:', e);
+        console.error('Failed to load template items:', e);
         alert('Failed to load template: ' + e.message);
     }
 }
 
-/**
- * Extract filename from URL (works for HuggingFace and similar URLs)
- */
 function extractFilenameFromUrl(url) {
     try {
-        // Remove query parameters
         const cleanUrl = url.split('?')[0];
         const parts = cleanUrl.split('/');
-        const filename = parts[parts.length - 1];
-
-        // Return if it looks like a valid filename
-        if (filename && filename.includes('.')) {
-            return filename;
-        }
-    } catch (e) {
-        console.warn('Failed to extract filename from URL:', e);
+        return parts[parts.length - 1];
+    } catch {
+        return null;
     }
-    return null;
 }

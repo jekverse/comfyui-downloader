@@ -477,6 +477,53 @@ async def api_get_template(request):
         
         return web.json_response(data)
     except Exception as e:
+        return web.json_response(data)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+@PromptServer.instance.routes.post("/downloader/save-template")
+async def api_save_template(request):
+    """Save a new template."""
+    try:
+        data = await request.json()
+        name = data.get("name", "").strip()
+        description = data.get("description", "").strip()
+        downloads = data.get("downloads", [])
+        
+        if not name:
+            return web.json_response({"error": "Template name is required"}, status=400)
+        
+        if not downloads:
+            return web.json_response({"error": "No downloads in template"}, status=400)
+
+        # Sanitize filename
+        safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', name)
+        filename = f"{safe_name}.json"
+        
+        templates_dir = get_templates_dir()
+        os.makedirs(templates_dir, exist_ok=True)
+        filepath = os.path.join(templates_dir, filename)
+        
+        # Don't overwrite existing files with different names unless explicit
+        if os.path.exists(filepath):
+            # Simple check to avoid instant overwrite, though user might intend update.
+            # For now, append timestamp if exists to be safe, or just overwrite.
+            # Let's overwrite as it's a save action.
+            pass
+
+        template_data = {
+            "name": name,
+            "description": description,
+            "downloads": downloads
+        }
+        
+        import json
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(template_data, f, indent=2)
+            
+        return web.json_response({"status": "saved", "filename": filename})
+        
+    except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
 print("[Downloader] Loaded - aria2 powered")
