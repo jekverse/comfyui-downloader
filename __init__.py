@@ -63,8 +63,9 @@ def detect_platform(url):
     return 'other'
 
 def get_model_directories():
-    base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    models = os.path.join(base, "models")
+    # base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # models = os.path.join(base, "models")
+    models = "/data/models"
     return {
         "diffusion_models": os.path.join(models, "diffusion_models"),
         "text_encoders": os.path.join(models, "text_encoders"),

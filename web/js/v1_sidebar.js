@@ -50,15 +50,53 @@ app.registerExtension({
                     // Inject styles
                     injectStyles();
 
-                    // Main Container
-                    const container = document.createElement('div');
-                    container.style.cssText = 'flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden;';
-                    el.appendChild(container);
+                    // Tab Bar
+                    const tabBar = document.createElement('div');
+                    tabBar.className = 'dl-tab-bar';
+                    el.appendChild(tabBar);
 
-                    // Build UI
-                    container.appendChild(createHeader());
-                    container.appendChild(createAddForm());
-                    container.appendChild(createQueueSection());
+                    const tab1 = document.createElement('button');
+                    tab1.className = 'dl-tab-btn active';
+                    tab1.textContent = 'Model Downloader';
+                    tabBar.appendChild(tab1);
+
+                    const tab2 = document.createElement('button');
+                    tab2.className = 'dl-tab-btn';
+                    tab2.textContent = 'New Tab';
+                    tabBar.appendChild(tab2);
+
+                    // Content 1: Model Downloader
+                    const content1 = document.createElement('div');
+                    content1.className = 'dl-tab-content active';
+                    el.appendChild(content1);
+
+                    // Build UI for Tab 1
+                    content1.appendChild(createHeader());
+                    content1.appendChild(createAddForm());
+                    content1.appendChild(createQueueSection());
+
+                    // Content 2: New Tab
+                    const content2 = document.createElement('div');
+                    content2.className = 'dl-tab-content';
+                    content2.style.padding = '20px';
+                    content2.style.justifyContent = 'center';
+                    content2.style.alignItems = 'center';
+                    content2.innerHTML = '<div style="font-size:16px; opacity:0.7;">ini adalah menu baru</div>';
+                    el.appendChild(content2);
+
+                    // Tab Switching Logic
+                    tab1.onclick = () => {
+                        tab1.classList.add('active');
+                        tab2.classList.remove('active');
+                        content1.classList.add('active');
+                        content2.classList.remove('active');
+                    };
+                    tab2.onclick = () => {
+                        tab1.classList.remove('active');
+                        tab2.classList.add('active');
+                        content1.classList.remove('active');
+                        content2.classList.add('active');
+                    };
 
                     // Load state from server
                     loadState();
@@ -269,6 +307,43 @@ function injectStyles() {
             font-size: 10px;
             color: #a5b4fc;
             margin-top: 4px;
+        }
+        .dl-tab-bar {
+            display: flex;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            background: rgba(0,0,0,0.2);
+            flex-shrink: 0;
+        }
+        .dl-tab-btn {
+            flex: 1;
+            padding: 12px;
+            background: none;
+            border: none;
+            color: rgba(255,255,255,0.5);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        .dl-tab-btn:hover {
+            color: rgba(255,255,255,0.8);
+            background: rgba(255,255,255,0.02);
+        }
+        .dl-tab-btn.active {
+            color: #6366f1;
+            border-bottom-color: #6366f1;
+            background: rgba(99,102,241,0.05);
+        }
+        .dl-tab-content {
+            display: none;
+            flex: 1;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+        }
+        .dl-tab-content.active {
+            display: flex;
         }
     `;
     document.head.appendChild(style);
