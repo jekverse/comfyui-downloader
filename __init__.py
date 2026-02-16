@@ -23,6 +23,11 @@ __all__ = ["WEB_DIRECTORY"]
 # =============================================
 
 CIVITAI_TOKEN = "3bf797ec7a0b65f197ca426ccb8cf193"
+DOWNLOAD_PROVIDER = "aria2" # Options: "aria2", "hf_hub"
+
+# Enable high performance transfer for HF
+os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 # =============================================
 # GLOBAL STATE
@@ -65,7 +70,7 @@ def detect_platform(url):
 def get_model_directories():
     # base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     # models = os.path.join(base, "models")
-    models = "/data/models"
+    models = "/root/volume/ComfyUI/models"
     return {
         "diffusion_models": os.path.join(models, "diffusion_models"),
         "text_encoders": os.path.join(models, "text_encoders"),
@@ -259,6 +264,85 @@ def download_with_aria2(item_id, url, directory, custom_filename, platform):
         return False
 
 # =============================================
+# HF DOWNLOADER
+# =============================================
+
+def download_with_hf(item_id, url, directory, custom_filename):
+    """Download using huggingface_hub with hf_transfer."""
+    global current_process, cancel_requested
+    
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        update_item(item_id, status="error", message="huggingface_hub not installed!")
+        add_log("❌ huggingface_hub is required. Install with: pip install huggingface_hub hf_transfer", "error")
+        return False
+
+    # Check if URL is valid HF URL
+    if 'huggingface.co' not in url and 'hf.co' not in url:
+        return False
+
+    # Extract repo_id and filename
+    # Expected format: https://huggingface.co/user/repo/blob/branch/filename
+    # or https://huggingface.co/user/repo/resolve/branch/filename
+    
+    try:
+        parsed = urlparse(url)
+        path_parts = parsed.path.strip('/').split('/')
+        
+        # path_parts: ['user', 'repo', 'blob', 'branch', 'filename...']
+        if len(path_parts) < 5:
+            raise ValueError("Invalid HF URL format")
+            
+        repo_id = f"{path_parts[0]}/{path_parts[1]}"
+        revision = path_parts[3]
+        filename = '/'.join(path_parts[4:])
+        
+        # Override with custom filename if provided (though HF structure dictates name usually)
+        # If custom_filename is provided, we might need to rename after download
+        # but hf_hub_download downloads specific file.
+        
+        update_item(item_id, detected_filename=filename, message=f"Downloading {filename} (HF)...")
+        add_log(f"📁 {directory}/{filename} (HF)")
+        
+        start_time = time.time()
+        
+        # Download
+        # We can't easy capture progress with hf_transfer enabled currently without custom callback
+        # But we can at least show it's running.
+        
+        update_item(item_id, message="Downloading with HF Transfer (Speed optimized)...")
+        
+        file_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            revision=revision,
+            local_dir=directory,
+            local_dir_use_symlinks=False,
+            force_download=False,
+            resume_download=True
+        )
+        
+        if custom_filename and custom_filename != filename:
+            new_path = os.path.join(directory, custom_filename)
+            os.rename(file_path, new_path)
+            file_path = new_path
+            filename = custom_filename
+
+        duration = time.time() - start_time
+        size = os.path.getsize(file_path)
+        update_item(item_id, status="completed", progress=100, 
+                   message=f"✅ {format_bytes(size)} in {format_time(duration)}")
+        add_log(f"✅ Complete: {filename}", "success")
+        return True
+
+    except Exception as e:
+        if not cancel_requested:
+            update_item(item_id, status="error", message=str(e))
+            add_log(f"❌ {e}", "error")
+        return False
+
+# =============================================
 # QUEUE PROCESSING
 # =============================================
 
@@ -286,16 +370,36 @@ def process_queue():
         current_item_id = item_id
         update_item(item_id, status="downloading", progress=0, message="Starting...")
         
-        add_log(f"📥 {next_item['platform'].upper()}: {next_item['url'][:50]}...")
+        url = next_item["url"]
+        platform = next_item["platform"]
+        provider = next_item.get("provider", DOWNLOAD_PROVIDER)
+        
+        add_log(f"📥 {platform.upper()} via {provider}: {url[:50]}...")
         
         try:
-            download_with_aria2(
-                item_id, 
-                next_item["url"], 
-                next_item["directory"], 
-                next_item.get("filename"),
-                next_item["platform"]
-            )
+            success = False
+            # Choose provider
+            if provider == "hf_hub" and platform == "huggingface":
+                 success = download_with_hf(
+                    item_id, 
+                    url, 
+                    next_item["directory"], 
+                    next_item.get("filename")
+                )
+            
+            # Fallback or default to aria2
+            if not success and not cancel_requested and next_item["status"] != "completed" and next_item["status"] != "error":
+                if provider == "hf_hub" and platform == "huggingface":
+                     add_log("⚠️ HF Download failed or not valid, trying aria2...", "warning")
+                
+                download_with_aria2(
+                    item_id, 
+                    url, 
+                    next_item["directory"], 
+                    next_item.get("filename"),
+                    platform
+                )
+                
         except Exception as e:
             if not cancel_requested:
                 update_item(item_id, status="error", message=str(e))
@@ -324,6 +428,7 @@ async def api_add(request):
         directory = data.get("directory", "").strip()
         filename_raw = data.get("filename")
         filename = filename_raw.strip() if filename_raw else None
+        provider = data.get("provider", "aria2").strip()
         
         if not url:
             return web.json_response({"error": "URL required"}, status=400)
@@ -335,6 +440,7 @@ async def api_add(request):
             "url": url,
             "directory": directory,
             "filename": filename,
+            "provider": provider,
             "platform": detect_platform(url),
             "status": "queued",
             "progress": 0,

@@ -387,6 +387,14 @@ function createAddForm() {
     content.innerHTML = `
         <input type="text" id="dl-url" class="dl-input" placeholder="Paste model URL here...">
         <div id="dl-platform" style="font-size:11px; min-height:16px;"></div>
+        
+        <div style="display:flex; gap:8px;">
+             <select id="dl-provider" class="dl-select" style="flex:1;">
+                <option value="aria2">🚀 Aria2 (Default)</option>
+                <option value="hf_hub">🤗 HF Transfer (Fast)</option>
+            </select>
+        </div>
+
         <select id="dl-dir" class="dl-select"></select>
         <input type="text" id="dl-custom-dir" class="dl-input" placeholder="Custom directory path..." style="display:none;">
         <input type="text" id="dl-filename" class="dl-input" placeholder="Custom filename (optional)">
@@ -402,6 +410,7 @@ function createAddForm() {
 
     elements.urlInput = content.querySelector('#dl-url');
     elements.platformDiv = content.querySelector('#dl-platform');
+    elements.providerSelect = content.querySelector('#dl-provider');
     elements.dirSelect = content.querySelector('#dl-dir');
     elements.customDirInput = content.querySelector('#dl-custom-dir');
     elements.filenameInput = content.querySelector('#dl-filename');
@@ -626,11 +635,13 @@ async function addDownload(autoStart) {
         return;
     }
 
+    const provider = elements.providerSelect.value;
+
     try {
         await api.fetchApi('/downloader/add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, directory, filename: filename || null })
+            body: JSON.stringify({ url, directory, filename: filename || null, provider })
         });
 
         // Clear inputs
