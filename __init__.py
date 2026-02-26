@@ -5,6 +5,7 @@ Supports HuggingFace, CivitAI, and generic URLs.
 """
 
 import os
+import shutil
 import re
 import time
 import subprocess
@@ -23,7 +24,7 @@ __all__ = ["WEB_DIRECTORY"]
 # =============================================
 
 CIVITAI_TOKEN = "3bf797ec7a0b65f197ca426ccb8cf193"
-DOWNLOAD_PROVIDER = "aria2" # Options: "aria2", "hf_hub"
+DOWNLOAD_PROVIDER = "hf_hub" # Options: "aria2", "hf_hub"
 
 # Enable high performance transfer for HF
 os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
@@ -296,38 +297,48 @@ def download_with_hf(item_id, url, directory, custom_filename):
             
         repo_id = f"{path_parts[0]}/{path_parts[1]}"
         revision = path_parts[3]
-        filename = '/'.join(path_parts[4:])
+        hf_filename = '/'.join(path_parts[4:])  # full path in repo (e.g. split_files/vae/ae.safetensors)
+        filename = os.path.basename(hf_filename)  # just the file name (e.g. ae.safetensors)
         
-        # Override with custom filename if provided (though HF structure dictates name usually)
-        # If custom_filename is provided, we might need to rename after download
-        # but hf_hub_download downloads specific file.
+        # Use custom filename if provided
+        if custom_filename:
+            filename = custom_filename
         
         update_item(item_id, detected_filename=filename, message=f"Downloading {filename} (HF)...")
         add_log(f"📁 {directory}/{filename} (HF)")
         
         start_time = time.time()
         
-        # Download
-        # We can't easy capture progress with hf_transfer enabled currently without custom callback
-        # But we can at least show it's running.
-        
         update_item(item_id, message="Downloading with HF Transfer (Speed optimized)...")
         
         file_path = hf_hub_download(
             repo_id=repo_id,
-            filename=filename,
+            filename=hf_filename,
             revision=revision,
             local_dir=directory,
-            local_dir_use_symlinks=False,
             force_download=False,
-            resume_download=True
         )
         
-        if custom_filename and custom_filename != filename:
-            new_path = os.path.join(directory, custom_filename)
-            os.rename(file_path, new_path)
-            file_path = new_path
-            filename = custom_filename
+        # Move file from nested HF path to flat target directory
+        target_path = os.path.join(directory, filename)
+        if os.path.abspath(file_path) != os.path.abspath(target_path):
+            if os.path.exists(target_path):
+                os.remove(target_path)
+            os.rename(file_path, target_path)
+            
+            # Cleanup junk intermediate directories created by hf_hub_download
+            top_level_dir = hf_filename.split('/')[0]
+            junk_dir = os.path.join(directory, top_level_dir)
+            if top_level_dir != filename and os.path.isdir(junk_dir):
+                shutil.rmtree(junk_dir, ignore_errors=True)
+                add_log(f"🧹 Cleaned up junk folder: {top_level_dir}", "info")
+            
+            file_path = target_path
+        
+        # Also cleanup .huggingface metadata directory if created
+        hf_meta_dir = os.path.join(directory, ".huggingface")
+        if os.path.isdir(hf_meta_dir):
+            shutil.rmtree(hf_meta_dir, ignore_errors=True)
 
         duration = time.time() - start_time
         size = os.path.getsize(file_path)
@@ -428,7 +439,7 @@ async def api_add(request):
         directory = data.get("directory", "").strip()
         filename_raw = data.get("filename")
         filename = filename_raw.strip() if filename_raw else None
-        provider = data.get("provider", "aria2").strip()
+        provider = data.get("provider", DOWNLOAD_PROVIDER).strip()
         
         if not url:
             return web.json_response({"error": "URL required"}, status=400)

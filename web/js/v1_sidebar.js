@@ -390,8 +390,8 @@ function createAddForm() {
         
         <div style="display:flex; gap:8px;">
              <select id="dl-provider" class="dl-select" style="flex:1;">
-                <option value="aria2">🚀 Aria2 (Default)</option>
-                <option value="hf_hub">🤗 HF Transfer (Fast)</option>
+                <option value="hf_hub">🤗 HF Transfer (Default)</option>
+                <option value="aria2">🚀 Aria2</option>
             </select>
         </div>
 
