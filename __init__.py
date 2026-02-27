@@ -10,6 +10,12 @@ import re
 import time
 import subprocess
 import threading
+import signal
+import pty
+import select
+import fcntl
+import termios
+import struct
 from urllib.parse import urlparse, unquote
 from datetime import datetime
 from aiohttp import web
@@ -96,7 +102,13 @@ def add_log(message, level="info"):
     except:
         pass
 
-def broadcast_state():
+def broadcast_state(force=False):
+    """Broadcast queue state. Throttled to max once per 500ms unless forced."""
+    global _last_broadcast_time
+    now = time.time()
+    if not force and hasattr(broadcast_state, '_last_time') and (now - broadcast_state._last_time) < 0.5:
+        return
+    broadcast_state._last_time = now
     try:
         with queue_lock:
             state = {"queue": list(download_queue), "is_processing": is_processing, "logs": persistent_logs[-50:]}
@@ -104,13 +116,15 @@ def broadcast_state():
     except:
         pass
 
-def update_item(item_id, **kwargs):
+def update_item(item_id, force_broadcast=False, **kwargs):
     with queue_lock:
         for item in download_queue:
             if item["id"] == item_id:
                 item.update(kwargs)
                 break
-    broadcast_state()
+    # Force broadcast on status changes, throttle on progress-only updates
+    should_force = force_broadcast or 'status' in kwargs
+    broadcast_state(force=should_force)
 
 # =============================================
 # FILENAME DETECTION
@@ -644,4 +658,368 @@ async def api_save_template(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
-print("[Downloader] Loaded - aria2 powered")
+# =============================================
+# TERMINAL
+# =============================================
+
+# Terminal global state (prefixed to avoid collision with downloader's current_process)
+terminal_process = None
+terminal_master_fd = None
+terminal_lock = threading.Lock()
+terminal_shell_starting = False
+terminal_cwd = os.getcwd()
+
+def find_shell():
+    """Find available shell."""
+    for shell in ["/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"]:
+        if os.path.exists(shell):
+            return shell
+    for name in ["bash", "sh", "ash", "dash"]:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+def terminal_output_reader(master_fd):
+    """Reads output from PTY and sends to frontend via WebSocket."""
+    global terminal_master_fd
+    try:
+        while terminal_master_fd == master_fd:
+            try:
+                r, w, x = select.select([master_fd], [], [], 0.05)
+                if master_fd in r:
+                    data = os.read(master_fd, 4096)
+                    if not data:
+                        break
+                    text = data.decode('utf-8', errors='replace')
+                    try:
+                        PromptServer.instance.send_sync("downloader.terminal.output", {
+                            "text": text,
+                            "type": "stdout"
+                        })
+                    except:
+                        pass
+            except (OSError, ValueError):
+                break
+    except Exception as e:
+        print(f"[Downloader Terminal] Output reader error: {e}")
+
+def terminal_monitor_process(proc, master_fd):
+    """Waits for process to finish and cleans up."""
+    global terminal_process, terminal_master_fd
+    try:
+        proc.wait()
+    except:
+        pass
+
+    with terminal_lock:
+        if terminal_process == proc:
+            terminal_process = None
+            if terminal_master_fd == master_fd:
+                try:
+                    os.close(master_fd)
+                except:
+                    pass
+                terminal_master_fd = None
+
+    try:
+        PromptServer.instance.send_sync("downloader.terminal.status", {"running": False})
+    except:
+        pass
+
+def start_terminal_shell():
+    """Starts a persistent shell if not already running."""
+    global terminal_process, terminal_master_fd, terminal_cwd, terminal_shell_starting
+
+    if terminal_shell_starting:
+        return False
+
+    with terminal_lock:
+        if terminal_process and terminal_process.poll() is None:
+            return True
+        terminal_shell_starting = True
+
+    shell = find_shell()
+    if not shell:
+        terminal_shell_starting = False
+        return False
+
+    try:
+        master_fd, slave_fd = pty.openpty()
+
+        try:
+            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        except:
+            pass
+
+        env = os.environ.copy()
+        env['TERM'] = 'xterm-256color'
+        env['SHELL'] = shell
+        env['PS1'] = '\\[\\033[32m\\]\\u@\\h\\[\\033[0m\\]:\\[\\033[34m\\]\\w\\[\\033[0m\\]\\$ '
+
+        process = subprocess.Popen(
+            [shell],
+            cwd=terminal_cwd,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            preexec_fn=os.setsid,
+            close_fds=True
+        )
+
+        os.close(slave_fd)
+
+        with terminal_lock:
+            terminal_process = process
+            terminal_master_fd = master_fd
+
+        reader_thread = threading.Thread(target=terminal_output_reader, args=(master_fd,), daemon=True)
+        reader_thread.start()
+
+        monitor_thread = threading.Thread(target=terminal_monitor_process, args=(process, master_fd), daemon=True)
+        monitor_thread.start()
+
+        print(f"[Downloader Terminal] Shell started: {shell} (PID: {process.pid})")
+        terminal_shell_starting = False
+        return True
+
+    except Exception as e:
+        print(f"[Downloader Terminal] Failed to start shell: {e}")
+        terminal_shell_starting = False
+        return False
+
+@PromptServer.instance.routes.post("/downloader/terminal/execute")
+async def terminal_execute(request):
+    global terminal_process, terminal_master_fd
+    try:
+        data = await request.json()
+        command = data.get("command", "")
+
+        if not terminal_process or terminal_process.poll() is not None:
+            def start_in_bg():
+                if start_terminal_shell():
+                    time.sleep(0.3)
+                    with terminal_lock:
+                        if terminal_master_fd:
+                            try:
+                                os.write(terminal_master_fd, b'\n')
+                            except:
+                                pass
+            threading.Thread(target=start_in_bg, daemon=True).start()
+            return web.json_response({"status": "starting"})
+
+        with terminal_lock:
+            if terminal_master_fd:
+                try:
+                    if command:
+                        os.write(terminal_master_fd, command.encode('utf-8'))
+                    return web.json_response({"status": "input_sent"})
+                except Exception as e:
+                    return web.json_response({"error": f"Write failed: {e}"}, status=500)
+
+        return web.json_response({"error": "No terminal session"}, status=500)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+@PromptServer.instance.routes.post("/downloader/terminal/interrupt")
+async def terminal_interrupt(request):
+    global terminal_process
+    with terminal_lock:
+        if terminal_process and terminal_process.poll() is None:
+            try:
+                os.killpg(os.getpgid(terminal_process.pid), signal.SIGINT)
+                return web.json_response({"status": "interrupted"})
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"error": "No running process"}, status=400)
+
+@PromptServer.instance.routes.post("/downloader/terminal/resize")
+async def terminal_resize(request):
+    global terminal_master_fd
+    try:
+        data = await request.json()
+        cols = data.get("cols", 80)
+        rows = data.get("rows", 24)
+
+        with terminal_lock:
+            if terminal_master_fd:
+                fcntl.ioctl(terminal_master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+                return web.json_response({"status": "resized"})
+        return web.json_response({"error": "No terminal session"}, status=400)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+# =============================================
+# FILE MANAGER
+# =============================================
+
+FILE_MANAGER_ROOT = os.path.realpath("/root/volume/ComfyUI")
+
+def safe_path(requested_path):
+    """Resolve and validate path is within FILE_MANAGER_ROOT."""
+    resolved = os.path.realpath(os.path.join(FILE_MANAGER_ROOT, requested_path))
+    if not resolved.startswith(FILE_MANAGER_ROOT):
+        return None
+    return resolved
+
+@PromptServer.instance.routes.post("/downloader/files/list")
+async def files_list(request):
+    """List directory contents."""
+    try:
+        data = await request.json()
+        rel_path = data.get("path", "")
+        target = safe_path(rel_path)
+        if not target:
+            return web.json_response({"error": "Invalid path"}, status=400)
+        if not os.path.isdir(target):
+            return web.json_response({"error": "Not a directory"}, status=400)
+
+        items = []
+        try:
+            entries = sorted(os.listdir(target), key=lambda x: (not os.path.isdir(os.path.join(target, x)), x.lower()))
+        except PermissionError:
+            return web.json_response({"error": "Permission denied"}, status=403)
+
+        for name in entries:
+            if name.startswith('.'):
+                continue
+            full = os.path.join(target, name)
+            is_dir = os.path.isdir(full)
+            try:
+                stat = os.stat(full)
+                items.append({
+                    "name": name,
+                    "is_dir": is_dir,
+                    "size": stat.st_size if not is_dir else 0,
+                    "mtime": stat.st_mtime
+                })
+            except (OSError, PermissionError):
+                items.append({"name": name, "is_dir": is_dir, "size": 0, "mtime": 0})
+
+        return web.json_response({"items": items, "path": os.path.relpath(target, FILE_MANAGER_ROOT)})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+@PromptServer.instance.routes.post("/downloader/files/delete")
+async def files_delete(request):
+    """Delete a file or directory."""
+    try:
+        data = await request.json()
+        rel_path = data.get("path", "")
+        target = safe_path(rel_path)
+        if not target or target == os.path.realpath(FILE_MANAGER_ROOT):
+            return web.json_response({"error": "Invalid path"}, status=400)
+        if not os.path.exists(target):
+            return web.json_response({"error": "Not found"}, status=404)
+
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        else:
+            os.remove(target)
+        return web.json_response({"status": "deleted"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+@PromptServer.instance.routes.post("/downloader/files/rename")
+async def files_rename(request):
+    """Rename a file or directory."""
+    try:
+        data = await request.json()
+        rel_path = data.get("path", "")
+        new_name = data.get("new_name", "").strip()
+        if not new_name or '/' in new_name or '\\' in new_name:
+            return web.json_response({"error": "Invalid name"}, status=400)
+
+        target = safe_path(rel_path)
+        if not target or target == os.path.realpath(FILE_MANAGER_ROOT):
+            return web.json_response({"error": "Invalid path"}, status=400)
+        if not os.path.exists(target):
+            return web.json_response({"error": "Not found"}, status=404)
+
+        new_path = os.path.join(os.path.dirname(target), new_name)
+        if os.path.exists(new_path):
+            return web.json_response({"error": "Name already exists"}, status=409)
+        os.rename(target, new_path)
+        return web.json_response({"status": "renamed"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+@PromptServer.instance.routes.post("/downloader/files/copy")
+async def files_copy(request):
+    """Copy a file or directory."""
+    try:
+        data = await request.json()
+        src_path = data.get("source", "")
+        dst_path = data.get("destination", "")
+
+        source = safe_path(src_path)
+        destination = safe_path(dst_path)
+        if not source or not destination:
+            return web.json_response({"error": "Invalid path"}, status=400)
+        if not os.path.exists(source):
+            return web.json_response({"error": "Source not found"}, status=404)
+
+        # Destination is a directory - copy into it
+        if os.path.isdir(destination):
+            dest_name = os.path.basename(source)
+            final_dest = os.path.join(destination, dest_name)
+            # Handle name collision
+            if os.path.exists(final_dest):
+                base, ext = os.path.splitext(dest_name)
+                final_dest = os.path.join(destination, f"{base}_copy{ext}")
+        else:
+            final_dest = destination
+
+        if os.path.isdir(source):
+            shutil.copytree(source, final_dest)
+        else:
+            shutil.copy2(source, final_dest)
+        return web.json_response({"status": "copied"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+@PromptServer.instance.routes.post("/downloader/files/move")
+async def files_move(request):
+    """Move (cut+paste) a file or directory."""
+    try:
+        data = await request.json()
+        src_path = data.get("source", "")
+        dst_path = data.get("destination", "")
+
+        source = safe_path(src_path)
+        destination = safe_path(dst_path)
+        if not source or not destination:
+            return web.json_response({"error": "Invalid path"}, status=400)
+        if source == os.path.realpath(FILE_MANAGER_ROOT):
+            return web.json_response({"error": "Cannot move root"}, status=400)
+        if not os.path.exists(source):
+            return web.json_response({"error": "Source not found"}, status=404)
+
+        if os.path.isdir(destination):
+            final_dest = os.path.join(destination, os.path.basename(source))
+        else:
+            final_dest = destination
+
+        shutil.move(source, final_dest)
+        return web.json_response({"status": "moved"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+@PromptServer.instance.routes.post("/downloader/files/mkdir")
+async def files_mkdir(request):
+    """Create a new directory."""
+    try:
+        data = await request.json()
+        rel_path = data.get("path", "")
+        target = safe_path(rel_path)
+        if not target:
+            return web.json_response({"error": "Invalid path"}, status=400)
+        if os.path.exists(target):
+            return web.json_response({"error": "Already exists"}, status=409)
+        os.makedirs(target, exist_ok=True)
+        return web.json_response({"status": "created"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+print("[Downloader] Loaded - aria2 powered + terminal + file manager")

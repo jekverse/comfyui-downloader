@@ -1,6 +1,34 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+// Load xterm.js and addon-fit from CDN
+const loadScript = (src) => {
+    return new Promise((resolve, reject) => {
+        if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+        const script = document.createElement("script");
+        script.src = src;
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+    });
+};
+
+const loadCSS = (href) => {
+    if (document.querySelector(`link[href="${href}"]`)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    document.head.appendChild(link);
+};
+
+// Terminal state - persists across tab switches
+const terminalState = {
+    term: null,
+    fitAddon: null,
+    initialized: false,
+    resizeObserver: null
+};
+
 // Global state - persists across tab open/close
 let globalState = {
     queue: [],
@@ -13,6 +41,19 @@ let elements = {};
 app.registerExtension({
     name: "My.DownloaderSidebar",
     async setup() {
+        // Load xterm resources
+        loadCSS("https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css");
+        await loadScript("https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js");
+        await loadScript("https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js");
+
+        // Listen for terminal output via WebSocket
+        api.addEventListener("downloader.terminal.output", (event) => {
+            const { text } = event.detail;
+            if (terminalState.term) {
+                terminalState.term.write(text);
+            }
+        });
+
         // Listen for queue updates
         api.addEventListener("downloader.queue", (event) => {
             globalState = event.detail;
@@ -62,8 +103,13 @@ app.registerExtension({
 
                     const tab2 = document.createElement('button');
                     tab2.className = 'dl-tab-btn';
-                    tab2.textContent = 'New Tab';
+                    tab2.textContent = 'Terminal';
                     tabBar.appendChild(tab2);
+
+                    const tab3 = document.createElement('button');
+                    tab3.className = 'dl-tab-btn';
+                    tab3.textContent = 'Files';
+                    tabBar.appendChild(tab3);
 
                     // Content 1: Model Downloader
                     const content1 = document.createElement('div');
@@ -75,27 +121,50 @@ app.registerExtension({
                     content1.appendChild(createAddForm());
                     content1.appendChild(createQueueSection());
 
-                    // Content 2: New Tab
+                    // Content 2: Terminal
                     const content2 = document.createElement('div');
                     content2.className = 'dl-tab-content';
-                    content2.style.padding = '20px';
-                    content2.style.justifyContent = 'center';
-                    content2.style.alignItems = 'center';
-                    content2.innerHTML = '<div style="font-size:16px; opacity:0.7;">ini adalah menu baru</div>';
+                    content2.style.padding = '8px';
+                    content2.style.backgroundColor = '#0d0d12';
+                    content2.style.overflow = 'hidden';
                     el.appendChild(content2);
 
+                    // Terminal container inside content2
+                    const termContainer = document.createElement('div');
+                    termContainer.style.borderRadius = '8px';
+                    termContainer.style.overflow = 'hidden';
+                    termContainer.style.backgroundColor = '#000';
+                    termContainer.style.flex = '1';
+                    termContainer.style.width = '100%';
+                    termContainer.style.height = '100%';
+                    content2.appendChild(termContainer);
+
+                    // Content 3: File Manager
+                    const content3 = document.createElement('div');
+                    content3.className = 'dl-tab-content';
+                    content3.style.padding = '0';
+                    content3.style.overflow = 'hidden';
+                    el.appendChild(content3);
+
+                    const allTabs = [tab1, tab2, tab3];
+                    const allContents = [content1, content2, content3];
+
+                    function switchTab(index) {
+                        allTabs.forEach((t, i) => {
+                            t.classList.toggle('active', i === index);
+                            allContents[i].classList.toggle('active', i === index);
+                        });
+                    }
+
                     // Tab Switching Logic
-                    tab1.onclick = () => {
-                        tab1.classList.add('active');
-                        tab2.classList.remove('active');
-                        content1.classList.add('active');
-                        content2.classList.remove('active');
-                    };
+                    tab1.onclick = () => switchTab(0);
                     tab2.onclick = () => {
-                        tab1.classList.remove('active');
-                        tab2.classList.add('active');
-                        content1.classList.remove('active');
-                        content2.classList.add('active');
+                        switchTab(1);
+                        initTerminal(termContainer);
+                    };
+                    tab3.onclick = () => {
+                        switchTab(2);
+                        initFileManager(content3);
                     };
 
                     // Load state from server
@@ -344,6 +413,143 @@ function injectStyles() {
         }
         .dl-tab-content.active {
             display: flex;
+        }
+        /* File Manager styles */
+        .fm-toolbar {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            gap: 6px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            background: rgba(0,0,0,0.2);
+            flex-shrink: 0;
+        }
+        .fm-toolbar-btn {
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 6px;
+            color: rgba(255,255,255,0.6);
+            padding: 5px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .fm-toolbar-btn:hover {
+            background: rgba(255,255,255,0.1);
+            color: #fff;
+        }
+        .fm-toolbar-btn.disabled {
+            opacity: 0.3;
+            pointer-events: none;
+        }
+        .fm-breadcrumb {
+            font-size: 11px;
+            color: rgba(255,255,255,0.4);
+            padding: 6px 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex-shrink: 0;
+        }
+        .fm-breadcrumb span {
+            cursor: pointer;
+            color: rgba(255,255,255,0.5);
+            transition: color 0.15s;
+        }
+        .fm-breadcrumb span:hover {
+            color: #6366f1;
+        }
+        .fm-tree {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px 0;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255,255,255,0.15) transparent;
+        }
+        .fm-tree::-webkit-scrollbar { width: 5px; }
+        .fm-tree::-webkit-scrollbar-track { background: transparent; }
+        .fm-tree::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+        .fm-item {
+            display: flex;
+            align-items: center;
+            padding: 5px 12px;
+            gap: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.1s;
+            user-select: none;
+            border-left: 2px solid transparent;
+        }
+        .fm-item:hover {
+            background: rgba(255,255,255,0.04);
+        }
+        .fm-item.selected {
+            background: rgba(99,102,241,0.12);
+            border-left-color: #6366f1;
+        }
+        .fm-item.cut {
+            opacity: 0.45;
+        }
+        .fm-item-icon {
+            font-size: 14px;
+            flex-shrink: 0;
+            width: 18px;
+            text-align: center;
+        }
+        .fm-item-name {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .fm-item-size {
+            font-size: 10px;
+            color: rgba(255,255,255,0.3);
+            flex-shrink: 0;
+        }
+        .fm-context-menu {
+            position: fixed;
+            background: #1e1e28;
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 8px;
+            padding: 4px 0;
+            min-width: 160px;
+            z-index: 99999;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .fm-context-item {
+            padding: 7px 14px;
+            font-size: 12px;
+            color: #ccc;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: background 0.1s;
+        }
+        .fm-context-item:hover {
+            background: rgba(99,102,241,0.15);
+            color: #fff;
+        }
+        .fm-context-item.danger:hover {
+            background: rgba(239,68,68,0.15);
+            color: #f87171;
+        }
+        .fm-context-sep {
+            height: 1px;
+            background: rgba(255,255,255,0.06);
+            margin: 4px 0;
+        }
+        .fm-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: rgba(255,255,255,0.3);
+            font-size: 12px;
         }
     `;
     document.head.appendChild(style);
@@ -892,5 +1098,472 @@ function extractFilenameFromUrl(url) {
         return parts[parts.length - 1];
     } catch {
         return null;
+    }
+}
+
+// =============================================
+// TERMINAL
+// =============================================
+
+function initTerminal(container) {
+    // If already initialized, just re-fit
+    if (terminalState.initialized && terminalState.term) {
+        // Re-open into container if needed (tab switch re-renders)
+        if (!container.querySelector('.xterm')) {
+            terminalState.term.open(container);
+        }
+        setTimeout(() => {
+            if (terminalState.fitAddon) {
+                terminalState.fitAddon.fit();
+                sendResize();
+            }
+        }, 100);
+        return;
+    }
+
+    // Load Google Font for terminal
+    if (!document.querySelector('link[href*="JetBrains+Mono"]')) {
+        const fontLink = document.createElement('link');
+        fontLink.rel = 'stylesheet';
+        fontLink.href = 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap';
+        document.head.appendChild(fontLink);
+    }
+
+    // Create xterm instance
+    terminalState.term = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Monaco, "Courier New", monospace',
+        theme: {
+            background: '#000000',
+        },
+        scrollback: 5000,
+        padding: 8
+    });
+
+    const FitAddon = window.FitAddon.FitAddon;
+    terminalState.fitAddon = new FitAddon();
+    terminalState.term.loadAddon(terminalState.fitAddon);
+
+    // Handle keyboard input → send to backend PTY
+    terminalState.term.onData(async (data) => {
+        try {
+            await api.fetchApi("/downloader/terminal/execute", {
+                method: "POST",
+                body: JSON.stringify({ command: data }),
+            });
+        } catch (e) {
+            console.error("Terminal input error:", e);
+        }
+    });
+
+    // Open terminal in the container
+    terminalState.term.open(container);
+
+    // Fit after opening
+    setTimeout(() => {
+        if (terminalState.fitAddon) {
+            terminalState.fitAddon.fit();
+            sendResize();
+        }
+    }, 100);
+
+    // Handle resize
+    if (terminalState.resizeObserver) {
+        terminalState.resizeObserver.disconnect();
+    }
+    terminalState.resizeObserver = new ResizeObserver(() => {
+        if (terminalState.fitAddon && terminalState.term) {
+            terminalState.fitAddon.fit();
+            sendResize();
+        }
+    });
+    terminalState.resizeObserver.observe(container);
+
+    terminalState.initialized = true;
+
+    // Start shell session
+    startTerminalSession();
+}
+
+function sendResize() {
+    if (!terminalState.term) return;
+    const cols = terminalState.term.cols;
+    const rows = terminalState.term.rows;
+    api.fetchApi("/downloader/terminal/resize", {
+        method: "POST",
+        body: JSON.stringify({ cols, rows }),
+    }).catch(() => { });
+}
+
+async function startTerminalSession() {
+    try {
+        await api.fetchApi("/downloader/terminal/execute", {
+            method: "POST",
+            body: JSON.stringify({ command: "" }),
+        });
+    } catch (e) {
+        console.error("Failed to start terminal session", e);
+    }
+}
+
+// =============================================
+// FILE MANAGER
+// =============================================
+
+const fmState = {
+    initialized: false,
+    currentPath: "",
+    items: [],
+    selectedItem: null,
+    clipboard: null, // { path, mode: 'copy'|'cut' }
+    container: null,
+    treeEl: null,
+    breadcrumbEl: null,
+    pasteBtn: null
+};
+
+function fmFormatSize(bytes) {
+    if (bytes === 0) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+    return `${bytes.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+function fmGetIcon(name, isDir) {
+    if (isDir) return '📁';
+    const ext = name.split('.').pop().toLowerCase();
+    const icons = {
+        safetensors: '🧠', ckpt: '🧠', pt: '🧠', pth: '🧠', bin: '🧠',
+        json: '📋', yaml: '📋', yml: '📋', toml: '📋', cfg: '📋',
+        py: '🐍', js: '📜', txt: '📄', md: '📄', log: '📄',
+        png: '🖼️', jpg: '🖼️', jpeg: '🖼️', webp: '🖼️', gif: '🖼️',
+        mp4: '🎬', avi: '🎬', mov: '🎬',
+        zip: '📦', tar: '📦', gz: '📦', rar: '📦'
+    };
+    return icons[ext] || '📄';
+}
+
+function initFileManager(container) {
+    if (fmState.initialized) {
+        return;
+    }
+    fmState.container = container;
+    container.innerHTML = '';
+
+    // Toolbar
+    const toolbar = document.createElement('div');
+    toolbar.className = 'fm-toolbar';
+    toolbar.innerHTML = `
+        <button class="fm-toolbar-btn" id="fm-refresh-btn">🔄 Refresh</button>
+        <button class="fm-toolbar-btn" id="fm-newfolder-btn">📁+ New</button>
+        <button class="fm-toolbar-btn disabled" id="fm-paste-btn">📋 Paste</button>
+        <div style="flex:1"></div>
+        <button class="fm-toolbar-btn" id="fm-up-btn">⬆️ Up</button>
+    `;
+    container.appendChild(toolbar);
+
+    fmState.pasteBtn = toolbar.querySelector('#fm-paste-btn');
+
+    toolbar.querySelector('#fm-refresh-btn').onclick = () => loadDirectory(fmState.currentPath);
+    toolbar.querySelector('#fm-newfolder-btn').onclick = () => fmNewFolder();
+    toolbar.querySelector('#fm-paste-btn').onclick = () => fmPaste();
+    toolbar.querySelector('#fm-up-btn').onclick = () => {
+        if (fmState.currentPath && fmState.currentPath !== '.') {
+            const parts = fmState.currentPath.split('/');
+            parts.pop();
+            loadDirectory(parts.join('/') || '');
+        }
+    };
+
+    // Breadcrumb
+    const breadcrumb = document.createElement('div');
+    breadcrumb.className = 'fm-breadcrumb';
+    container.appendChild(breadcrumb);
+    fmState.breadcrumbEl = breadcrumb;
+
+    // Tree container
+    const tree = document.createElement('div');
+    tree.className = 'fm-tree';
+    container.appendChild(tree);
+    fmState.treeEl = tree;
+
+    // Close context menu on click anywhere
+    document.addEventListener('click', () => {
+        const existing = document.querySelector('.fm-context-menu');
+        if (existing) existing.remove();
+    });
+
+    fmState.initialized = true;
+    loadDirectory('');
+}
+
+async function loadDirectory(relPath) {
+    try {
+        const res = await api.fetchApi('/downloader/files/list', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: relPath })
+        });
+        const data = await res.json();
+        if (data.error) {
+            fmState.treeEl.innerHTML = `<div class="fm-empty">❌ ${data.error}</div>`;
+            return;
+        }
+
+        fmState.currentPath = data.path === '.' ? '' : data.path;
+        fmState.items = data.items;
+        fmState.selectedItem = null;
+        renderBreadcrumb();
+        renderFileTree();
+    } catch (e) {
+        console.error('File manager load error:', e);
+        fmState.treeEl.innerHTML = `<div class="fm-empty">❌ Failed to load</div>`;
+    }
+}
+
+function renderBreadcrumb() {
+    const parts = fmState.currentPath ? fmState.currentPath.split('/') : [];
+    let html = '<span data-path="">📂 ComfyUI</span>';
+    let accum = '';
+    for (const part of parts) {
+        accum += (accum ? '/' : '') + part;
+        html += ` / <span data-path="${accum}">${part}</span>`;
+    }
+    fmState.breadcrumbEl.innerHTML = html;
+
+    fmState.breadcrumbEl.querySelectorAll('span').forEach(span => {
+        span.onclick = () => loadDirectory(span.dataset.path);
+    });
+}
+
+function renderFileTree() {
+    const tree = fmState.treeEl;
+    if (fmState.items.length === 0) {
+        tree.innerHTML = '<div class="fm-empty">📭 Empty directory</div>';
+        return;
+    }
+
+    tree.innerHTML = '';
+    for (const item of fmState.items) {
+        const row = document.createElement('div');
+        row.className = 'fm-item';
+        const itemPath = fmState.currentPath ? `${fmState.currentPath}/${item.name}` : item.name;
+
+        // Mark items that are cut
+        if (fmState.clipboard && fmState.clipboard.mode === 'cut' && fmState.clipboard.path === itemPath) {
+            row.classList.add('cut');
+        }
+
+        row.innerHTML = `
+            <span class="fm-item-icon">${fmGetIcon(item.name, item.is_dir)}</span>
+            <span class="fm-item-name">${item.name}</span>
+            <span class="fm-item-size">${item.is_dir ? '' : fmFormatSize(item.size)}</span>
+        `;
+
+        // Click to select or open directory
+        row.onclick = (e) => {
+            e.stopPropagation();
+            // Deselect all, select this one
+            tree.querySelectorAll('.fm-item').forEach(r => r.classList.remove('selected'));
+            row.classList.add('selected');
+            fmState.selectedItem = { ...item, path: itemPath };
+        };
+
+        // Double‑click to open directory
+        row.ondblclick = (e) => {
+            e.stopPropagation();
+            if (item.is_dir) {
+                loadDirectory(itemPath);
+            }
+        };
+
+        // Right‑click context menu
+        row.oncontextmenu = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            tree.querySelectorAll('.fm-item').forEach(r => r.classList.remove('selected'));
+            row.classList.add('selected');
+            fmState.selectedItem = { ...item, path: itemPath };
+            showContextMenu(e.clientX, e.clientY, item, itemPath);
+        };
+
+        tree.appendChild(row);
+    }
+
+    // Click on empty area to deselect
+    tree.onclick = () => {
+        tree.querySelectorAll('.fm-item').forEach(r => r.classList.remove('selected'));
+        fmState.selectedItem = null;
+    };
+
+    // Right-click on empty area
+    tree.oncontextmenu = (e) => {
+        if (e.target === tree) {
+            e.preventDefault();
+            showContextMenu(e.clientX, e.clientY, null, null);
+        }
+    };
+}
+
+function showContextMenu(x, y, item, itemPath) {
+    // Remove existing
+    const old = document.querySelector('.fm-context-menu');
+    if (old) old.remove();
+
+    const menu = document.createElement('div');
+    menu.className = 'fm-context-menu';
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+
+    const entries = [];
+
+    if (item) {
+        if (item.is_dir) {
+            entries.push({ label: '📂 Open', action: () => loadDirectory(itemPath) });
+            entries.push({ sep: true });
+        }
+        entries.push({ label: '📋 Copy', action: () => fmSetClipboard(itemPath, 'copy') });
+        entries.push({ label: '✂️ Cut', action: () => fmSetClipboard(itemPath, 'cut') });
+        entries.push({ sep: true });
+        entries.push({ label: '✏️ Rename', action: () => fmRename(itemPath, item.name) });
+        entries.push({ sep: true });
+        entries.push({ label: '🗑️ Delete', action: () => fmDelete(itemPath, item.name), danger: true });
+    }
+
+    if (fmState.clipboard) {
+        if (item) entries.push({ sep: true });
+        const mode = fmState.clipboard.mode === 'cut' ? 'Move' : 'Paste';
+        entries.push({ label: `📋 ${mode} here`, action: () => fmPaste() });
+    }
+
+    if (!item) {
+        entries.push({ label: '📁+ New Folder', action: () => fmNewFolder() });
+        entries.push({ sep: true });
+        entries.push({ label: '🔄 Refresh', action: () => loadDirectory(fmState.currentPath) });
+    }
+
+    for (const entry of entries) {
+        if (entry.sep) {
+            const sep = document.createElement('div');
+            sep.className = 'fm-context-sep';
+            menu.appendChild(sep);
+        } else {
+            const item = document.createElement('div');
+            item.className = `fm-context-item${entry.danger ? ' danger' : ''}`;
+            item.textContent = entry.label;
+            item.onclick = (e) => { e.stopPropagation(); menu.remove(); entry.action(); };
+            menu.appendChild(item);
+        }
+    }
+
+    document.body.appendChild(menu);
+
+    // Adjust position if off-screen
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = `${window.innerWidth - rect.width - 8}px`;
+    if (rect.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - rect.height - 8}px`;
+}
+
+function fmSetClipboard(path, mode) {
+    fmState.clipboard = { path, mode };
+    if (fmState.pasteBtn) {
+        fmState.pasteBtn.classList.remove('disabled');
+        fmState.pasteBtn.textContent = mode === 'cut' ? '📋 Move' : '📋 Paste';
+    }
+    renderFileTree();
+}
+
+async function fmPaste() {
+    if (!fmState.clipboard) return;
+    const { path, mode } = fmState.clipboard;
+    const endpoint = mode === 'cut' ? '/downloader/files/move' : '/downloader/files/copy';
+
+    try {
+        const res = await api.fetchApi(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source: path, destination: fmState.currentPath || '.' })
+        });
+        const data = await res.json();
+        if (data.error) {
+            alert(`Error: ${data.error}`);
+            return;
+        }
+
+        if (mode === 'cut') {
+            fmState.clipboard = null;
+            if (fmState.pasteBtn) {
+                fmState.pasteBtn.classList.add('disabled');
+                fmState.pasteBtn.textContent = '📋 Paste';
+            }
+        }
+        loadDirectory(fmState.currentPath);
+    } catch (e) {
+        alert('Operation failed: ' + e.message);
+    }
+}
+
+async function fmRename(path, currentName) {
+    const newName = prompt('Rename to:', currentName);
+    if (!newName || newName === currentName) return;
+
+    try {
+        const res = await api.fetchApi('/downloader/files/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, new_name: newName })
+        });
+        const data = await res.json();
+        if (data.error) {
+            alert(`Error: ${data.error}`);
+            return;
+        }
+        loadDirectory(fmState.currentPath);
+    } catch (e) {
+        alert('Rename failed: ' + e.message);
+    }
+}
+
+async function fmDelete(path, name) {
+    if (!confirm(`Delete "${name}"?\nThis cannot be undone.`)) return;
+
+    try {
+        const res = await api.fetchApi('/downloader/files/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path })
+        });
+        const data = await res.json();
+        if (data.error) {
+            alert(`Error: ${data.error}`);
+            return;
+        }
+        loadDirectory(fmState.currentPath);
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
+    }
+}
+
+async function fmNewFolder() {
+    const name = prompt('New folder name:');
+    if (!name) return;
+
+    const newPath = fmState.currentPath ? `${fmState.currentPath}/${name}` : name;
+    try {
+        const res = await api.fetchApi('/downloader/files/mkdir', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: newPath })
+        });
+        const data = await res.json();
+        if (data.error) {
+            alert(`Error: ${data.error}`);
+            return;
+        }
+        loadDirectory(fmState.currentPath);
+    } catch (e) {
+        alert('Create folder failed: ' + e.message);
     }
 }
